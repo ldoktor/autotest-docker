@@ -50,9 +50,17 @@ class empty(SubSubtest):
         # name parameter cannot contain tag, don't assume prefix/postfix content
         self.check_output()
         self.check_status()
-        image_id = self.lookup_image_id(self.subStuff['image_name'],
-                                        self.subStuff['image_tag'])
-        self.subStuff['image_id'] = image_id
+        # new
+        image_name = self.subStuff['image_name']
+        image_tag = self.subStuff['image_tag']
+        di = DockerImages(self.parentSubtest)
+        imgs = di.list_imgs_with_full_name_components(repo=image_name,
+                                                      tag=image_tag)
+        self.failif(len(imgs) > 1, "Got multiple images named %s:%s (%s)"
+                    % (image_name, image_tag, imgs))
+        self.subStuff['image_id'] = None
+        if imgs:
+            self.subStuff['image_id'] = imgs[0].long_id
         self.image_check()
 
     def image_check(self):
@@ -60,8 +68,7 @@ class empty(SubSubtest):
         result_id = self.subStuff['result_id']
         image_id = self.subStuff['image_id']
         self.logdebug("Resulting ID: %s", result_id)
-        result_contains_id = result_id.count(image_id)
-        self.failif(not result_contains_id,
+        self.failif(result_id != image_id,
                     "Repository Id's do not match (%s,%s)"
                     % (result_id, image_id))
 
@@ -88,38 +95,3 @@ class empty(SubSubtest):
     def check_status(self):
         condition = self.subStuff['cmdresult'].exit_status == 0
         self.failif(not condition, "Non-zero exit status")
-
-    def lookup_image_id(self, image_name, image_tag):
-        # FIXME: We need a standard way to do this
-        image_id = None
-        # Any API failures must not be fatal
-        if DOCKERAPI:
-            client = docker.Client()
-            results = client.images(name=image_name)
-            image = None
-            if len(results) == 1:
-                image = results[0]
-                # Could be unicode strings
-                if ((str(image['Repository']) == image_name) and
-                    (str(image['Tag']) == image_tag)):
-                    image_id = image.get('Id')
-            if ((image_id is None) or (len(image_id) < 12)):
-                logging.error("Could not lookup image %s:%s Id using "
-                              "docker python API Data: '%s'",
-                              image_name, image_tag, str(image))
-                image_id = None
-        # Don't have DOCKERAPI or API failed (still need image ID)
-        if image_id is None:
-            subargs = ['--quiet', image_name]
-            dkrcmd = NoFailDockerCmd(self.parentSubtest, 'images', subargs)
-            # fail -> raise exception
-            cmdresult = dkrcmd.execute()
-            stdout_strip = cmdresult.stdout.strip()
-            # TODO: Better image ID validity check?
-            if len(stdout_strip) == 12:
-                image_id = stdout_strip
-            else:
-                self.loginfo("Error retrieving image id, unexpected length")
-        if image_id is not None:
-            self.loginfo("Found image Id '%s'", image_id)
-        return image_id
