@@ -9,17 +9,14 @@ Sub-subtest module used by dockerimport test
 # Okay to be less-strict for these cautions/warnings in subtests
 # pylint: disable=C0103,C0111,R0904,C0103
 
-import os, logging
+import os
+
 from autotest.client import utils
 from dockertest import output
-from dockertest.subtest import SubSubtest
 from dockertest.dockercmd import DockerCmd, NoFailDockerCmd
+from dockertest.images import DockerImages
+from dockertest.subtest import SubSubtest
 
-try:
-    import docker
-    DOCKERAPI = True
-except ImportError:
-    DOCKERAPI = False
 
 class empty(SubSubtest):
 
@@ -47,7 +44,7 @@ class empty(SubSubtest):
 
     def postprocess(self):
         super(empty, self).postprocess()
-        # name parameter cannot contain tag, don't assume prefix/postfix content
+        # name parameter can't contain tag, don't assume prefix/postfix content
         self.check_output()
         self.check_status()
         # new
