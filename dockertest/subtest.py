@@ -431,5 +431,5 @@ class SubSubtestCaller(Subtest):
             # Create instance, pass this subtest subclass as only parameter
             return cls(self)
         # Non-fatal error
-        self.logerror("Failed importing sub-subtest %s")
+        self.logerror("Failed importing sub-subtest %s", name)
         return None
