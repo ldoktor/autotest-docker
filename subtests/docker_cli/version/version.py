@@ -15,9 +15,9 @@ from dockertest.dockercmd import NoFailDockerCmd
 
 try:
     from docker.client import Client
-    DOCKERAPI = True
 except ImportError:
-    DOCKERAPI = False
+    from dockertest.fake_docker_api import Client
+
 
 class version(subtest.Subtest):
 
@@ -40,22 +40,9 @@ class version(subtest.Subtest):
 
     def verify_version(self, docker_version):
         # TODO: Make URL to daemon configurable
-        client_version = None
-        if DOCKERAPI:
-            client = Client()
-            _version = client.version()
-            client_version = _version['Version']
-        else:
-            import json
-            # FIXME: use httplib to do this properly
-            from autotest.client import utils
-            cmdresult = utils.run('echo -e "GET /version HTTP/1.1\r\n" |'
-                                  ' nc -U /var/run/docker.sock')
-            lines = cmdresult.stdout.strip().splitlines()
-            # content follows blank after headers
-            json_string = lines[lines.index('')+1]
-            json_obj = json.loads(json_string)
-            client_version = json_obj['Version']
+        client = Client()
+        _version = client.version()
+        client_version = _version['Version']
         self.failif(client_version != docker_version.client,
                     "Docker cli version %s does not match docker client API "
                     "version %s" % (client_version, docker_version.client))
