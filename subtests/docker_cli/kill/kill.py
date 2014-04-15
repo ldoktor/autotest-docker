@@ -88,9 +88,11 @@ class kill_base(SubSubtest):
             sequence = []
             signals = [int(sig) for sig in self.config['kill_signals'].split()]
             signals = range(*signals)
-            for noncatchable_signals in (9, 17):
+            skipped_signals = (int(_) for _ in
+                               self.config.get('skip_signals', "").split())
+            for skipped_signal in skipped_signals:
                 try:
-                    signals.remove(noncatchable_signals)
+                    signals.remove(skipped_signal)
                 except ValueError:
                     pass
             for _ in xrange(self.config['no_iterations']):
