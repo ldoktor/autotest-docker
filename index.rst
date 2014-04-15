@@ -644,6 +644,31 @@ Three simple subsubtests that verify exit status and signal pass-through capabil
    i.e. Copy ``config_defaults/defaults.ini`` to ``config_custom/defaults.ini``
    and modify the values.
 
+``docker_cli/run_sigproxy`` Sub-test
+=======================================
+
+Test usage of docker run/attach with/without '--sig-proxy'
+
+``docker_cli/run_sigproxy`` Prerequisites
+---------------------------------------------
+
+*  A remote registry server
+
+``docker_cli/run_sigproxy`` Configuration
+--------------------------------------
+
+*  Customized configuration for ``docker_repo_name``, ``docker_repo_tag``,
+   and optionally ``docker_registry_host`` and/or ``docker_registry_user``.
+   i.e. Copy ``config_defaults/defaults.ini`` to ``config_custom/defaults.ini``
+   and modify the values.
+*  The ``container_name_prefix`` is prefix of the tested container followed by
+   random characters to make it unique.
+*  The ``run_options_csv`` modifies the running container options.
+*  The ``attach_options_csv`` modifies the attach process options.
+*  The ``exec_cmd`` modifies the container command
+*  The ``wait_start`` is duration of container init
+*  The ``kill_signals`` space separated list of signals used in test
+*  The ``negative_test`` changes the expected results
 
 ``docker_cli/rmi`` Sub-test
 =======================================
