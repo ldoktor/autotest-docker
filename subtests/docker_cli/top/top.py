@@ -26,6 +26,8 @@ from dockertest.dockercmd import (AsyncDockerCmd, NoFailDockerCmd,
 from dockertest.images import DockerImage
 from dockertest.output import OutputGood
 from dockertest.xceptions import (DockerCommandError, DockerExecError)
+from dockertest import event_handler
+
 
 class top(subtest.Subtest):
 
@@ -63,9 +65,21 @@ class top(subtest.Subtest):
         fin = DockerImage.full_name_from_defaults(self.config)
         subargs.append(fin)
         subargs.append("bash")
-        container = NoFailDockerCmd(self, 'run', subargs)
+        subargs.append("-c")
+        subargs.append("\"trap 'echo IGNORE' SIGTERM; while :; do echo .; sleep 1; done\"")
+        container = AsyncDockerCmd(self, 'run', subargs, timeout=10)
         self.stuff['container_cmd'] = container
+        events = event_handler.EventHandler()
+        print 3*"\n"
+        a = time.time()
         container.execute()
+        events.wait_for(event_handler.RUN, 10)
+        print time.time() - a
+        time.sleep(0.1)
+        os.kill(container.process_id, 15)
+        print container.wait(2)
+        print 3*"\n"
+        raise Exception()
 
         if self.config.get('attach_options_csv'):
             subargs = [arg for arg in
@@ -77,7 +91,14 @@ class top(subtest.Subtest):
         self.stuff['container_cmd'] = container  # overwrites finished cmd
         stdin = os.pipe()
         self.stuff['container_stdin'] = stdin[1]
+        print 3*"\n"
+        events.wait_for([])
+        a = time.time()
         container.execute(stdin[0])
+        events.wait_for(["+attach"])
+        print time.time() - a
+        print 3*"\n"
+        raise Exception()
 
     def initialize(self):
         super(top, self).initialize()
