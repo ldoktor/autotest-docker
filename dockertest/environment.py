@@ -10,6 +10,9 @@ Low-level/standalone host-environment handling/checking utilities/classes/data
 import os
 import os.path
 import subprocess
+import re
+import time
+import tempfile
 
 class AllGoodBase(object):
 
@@ -178,3 +181,228 @@ class EnvCheck(AllGoodBase):
         return {'args':fullpath, 'bufsize':1, 'stdout':subprocess.PIPE,
                 'stderr':subprocess.PIPE, 'close_fds':True, 'shell':True,
                 'env':self.config}
+
+
+class Event(object):
+    slots = ("type", "req_id", "cont_id", "status")
+
+    def __init__(self, ev_type, req_id, cont_id, status=None):
+        self.type = ev_type
+        self.req_id = req_id
+        self.cont_id = cont_id
+        self.status = status
+
+    def __str__(self):
+        return "%s %s %s %s" % (self.type, self.req_id, self.cont_id,
+                                self.status)
+
+    def __eq__(self, other):
+        if isinstance(other, Event):
+            return self.__eq_event__(other)
+        elif isinstance(other, str):
+            return self.__eq_str__(other)
+        elif isinstance(other, dict):
+            return self.__eq_dict__(other)
+        else:
+            raise ValueError("Can't compare to %s" % other)
+
+    def __eq_event__(self, other):
+        for slot in self.slots:
+            if getattr(self, slot) != getattr(other, slot):
+                return False
+        return True
+
+    def __eq_str__(self, other):
+        if self.type == other:
+            return True
+        else:
+            return False
+
+    def __eq_dict__(self, other):
+        for slot in self.slots:
+            try:
+                value = other[slot]
+                if value != getattr(self, slot):
+                    return False
+            except KeyError:
+                pass
+        return True
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+
+class JournalGrabber(object):
+    """
+    This class returns the `cat` (without time) output of journalctl since
+    the last self.reset() time. Additionally you can specify the desired unit.
+    """
+    def __init__(self):
+        ctl = subprocess.Popen("LANG=C journalctl --version", shell=True,
+                               stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, close_fds=True)
+        wait_for(lambda: ctl.poll() is not None, 5, step=0)
+        if ctl.poll() is None:
+            ctl.kill()
+            raise EnvironmentError("journalctl --version hanged.")
+        elif ctl.poll() is not 0:
+            raise EnvironmentError("journalctl --version returned non-zero"
+                                   " check you have journalctl available.")
+        self.start = None
+
+    def reset(self):
+        self.start = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    def get(self, unit=None):
+        cmd = "LANG=C journalctl -o cat --no-pager"
+        if unit:
+            cmd += " -u " + str(unit)
+        if self.start:
+            cmd += " --since '%s'" % self.start
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, close_fds=True)
+        wait_for(lambda: process.poll() is not None, 5, step=0)
+        if process.poll() is None:
+            process.kill()
+            raise StopIteration("%s didn't finish in 5s" % cmd)
+        elif process.poll() is not 0:
+            return ""
+        return process.stdout.read()
+
+
+class MessagesGrabber(object):
+    """
+    This class reads the /var/log/messages(-like) file and returns the stripped
+    messages since the last self.reset(). You can also grep for certain unit.
+    """
+    def __init__(self, messages=None):
+        if messages is None:
+            messages = '/var/log/messages'
+        self.messages = open(messages, 'r', 0)
+        self._service_offset = self._find_offset(self.messages)
+
+    def _find_offset(self, messages):
+        for line in messages.xreadlines():
+            for keyword in (' kernel: ', ' docker: ', ' NetworkManager: '):
+                idx = line.find(keyword)
+                if idx > 0:
+                    return idx + 1
+        else:
+            raise ValueError("Can't find /var/log/messages offset of services")
+
+    def reset(self):
+        self.messages.seek(0, 2)    # Move to the end
+
+    def get(self, unit=None):
+        out = []
+        if unit:
+            unit += ": "    # journalctl name is followed by ": " in messages
+        self.messages.seek(0, 1)    # Without the seek my python won't read
+        for line in self.messages.xreadlines():
+            line = line[self._service_offset:]
+            if unit and line[:len(unit)] != unit:
+                continue
+            out.append(line.split(':', 1)[1].strip())
+        return "\n".join(out)
+
+
+class EventHandler(object):
+    START = ("+start", "+allocate_interface", "-start", "-allocate_interface")
+    RUN = ("+create", "-create",) + START
+    FINISH = ("+release_interface", "+inspect", "-release_interface",
+              "-inspect",)
+    LIST = ("+containers", "-containers",)
+    REMOVE = ("+container_delete", "-container_delete",)
+    re = re.compile(r'\[[^\|]+\|(\w{8})\] ([+-])job (\w+)\((\w*[^\)]*)\)( = '
+                    r'\w+ \((\d+)\))?\n?')
+
+    def __init__(self, messages=None):
+        if messages is None:
+            try:    # try to use journalctl
+                self.messages = JournalGrabber()
+            except EnvironmentError:    # failback to messages parser
+                messages = '/var/log/messages'
+        if messages:
+            self.messages = MessagesGrabber(messages)
+        self.messages.reset()
+
+    def _parse_line(self, line):
+        res = self.re.match(line)
+        if not res:
+            return  # Line doesn't match job prescription
+        res = res.groups()
+        # +-$job_name, req_id, container_id, result/None
+        return Event(res[1] + res[2], res[0], res[3], res[5] or None)
+
+    def get_events(self):
+        events = []
+        for line in self.messages.get('docker').splitlines():
+            event = self._parse_line(line)
+            if event:
+                events.append(event)
+        self.messages.reset()
+        return events
+
+    def wait_for(self, events, timeout=None):
+        """
+        :return: List of matching registered events
+        """
+        if not events:  # No events, just wait and move to the end of the file
+            if timeout:
+                time.sleep(timeout)
+            return self.get_events()
+        handled = {}
+        if timeout is None:
+            condition = lambda: True
+        else:
+            endtime = time.time() + timeout
+            condition = lambda: time.time() < endtime
+        simple_events = []
+        specific_events = []
+        for event in events:
+            if isinstance(event, Event):
+                specific_events.append(event)
+            elif isinstance(event, dict) and event.get('req_id'):
+                specific_events.append(event)
+            else:
+                simple_events.append(event)
+        _specific_events = [False] * len(specific_events)
+        current = []
+        while condition():
+            for event in self.get_events():
+                if event in specific_events:    # In specific events
+                    _specific_events[specific_events.index(event)] = True
+                elif event in simple_events:
+                    if event.req_id not in handled:     # New req_id
+                        handled[event.req_id] = []
+                    current = handled[event.req_id]
+                    if event not in current:    # Not there, append it
+                        current.append(event)
+                else:
+                    continue
+                if (len(current) == len(simple_events)
+                    and False not in _specific_events):
+                    return specific_events + handled[event.req_id]
+        raise StopIteration("Events did not occur until timeout. Missing "
+                            "events: %s" % handled)
+
+
+def wait_for(func, timeout, first=0.0, step=1.0):
+    """
+    If func() evaluates to True before timeout expires, return the
+    value of func(). Otherwise return None.
+
+    @brief: Wait until func() evaluates to True.
+
+    :param timeout: Timeout in seconds
+    :param first: Time to sleep before first attempt
+    :param steps: Time to sleep between attempts in seconds
+    """
+    end_time = time.time() + timeout
+    time.sleep(first)
+    while time.time() < end_time:
+        output = func()
+        if output:
+            return output
+        time.sleep(step)
+    return None
