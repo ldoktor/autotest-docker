@@ -17,9 +17,29 @@ from dockertest.containers import DockerContainersCLI
 from dockertest.images import DockerImage
 from dockertest import subtest
 from dockertest import config
+from dockertest.environment import EventHandler
 
 # Okay to be less-strict for these cautions/warnings in subtests
 # pylint: disable=C0103,C0111,R0904,C0103
+
+
+class EventDockerCmd(AsyncDockerCmd):
+    """
+    Behaves as (Sync)DockerCmd but the command execution time starts
+    when all events are received.
+    """
+    def execute(self, stdin=None, events=None, start_timeout=None):
+        if events:
+            handler = EventHandler()
+        super(EventDockerCmd, self).execute(stdin)
+        if events:
+            handler.wait_for(events, start_timeout)
+        cmd_start_time = time.time()
+        result = self.wait()
+        # Modify the cmd duration
+        result.duration = time.time() - cmd_start_time
+        return self._async_job.result
+
 
 class DockerContainersCLIWithOutSize(DockerContainersCLI):
 
@@ -148,13 +168,13 @@ class short_term_app(start_base):
             self.config["docker_repo_name"],
             self.config["docker_repo_tag"])
         # Private to this instance, outside of __init__
-        prep_changes = DockerCmd(self.parent_subtest, "run",
-                                 ["-d",
-                                  docker_name,
-                                  self.config["run_cmd"]],
-                                 self.config['docker_run_timeout'])
+        prep_changes = EventDockerCmd(self.parent_subtest, "run",
+                                      ["-d",
+                                       docker_name,
+                                       self.config["run_cmd"]],
+                                      self.config['docker_run_timeout'])
 
-        results = prep_changes.execute()
+        results = prep_changes.execute(None, EventHandler.RUN, 600)
         if results.exit_status:
             raise error.TestNAError("Problems during initialization of"
                                     " test: %s" % results)
