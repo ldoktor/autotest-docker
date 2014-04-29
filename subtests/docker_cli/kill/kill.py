@@ -12,14 +12,13 @@ import itertools
 import random
 import time
 
-from autotest.client import utils
 from autotest.client.shared.utils import wait_for
 from dockertest import config, subtest, xceptions
 from dockertest.containers import DockerContainers
 from dockertest.dockercmd import AsyncDockerCmd, DockerCmd, NoFailDockerCmd
 from dockertest.images import DockerImage
 from dockertest.output import OutputGood
-from dockertest.subtest import SubSubtest
+import os
 
 
 # TODO: Not all named signals seems to be supported with docker0.9
@@ -39,7 +38,7 @@ class kill(subtest.SubSubtestCaller):
     config_section = 'docker_cli/kill'
 
 
-class kill_base(SubSubtest):
+class kill_base(subtest.SubSubtest):
 
     """ Base class """
 
@@ -259,8 +258,9 @@ class kill_check_base(kill_base):
         timeout = self.config['stress_cmd_timeout']
         self.sub_stuff['kill_results'] = []
         stopped_log = False
+        _container_pid = container_cmd.process_id
         for cmd, signal in itertools.izip(kill_cmds, signals_sequence):
-            if cmd is not False:    # Custom kill signal
+            if cmd is not False:    # Custom command, execute&check cmd status
                 result = cmd.execute()
                 if signal == -1:
                     if result.exit_status == 0:    # Any bad signal
@@ -276,9 +276,11 @@ class kill_check_base(kill_base):
                               self.sub_stuff['kill_results'][-1].exit_status))
                     raise xceptions.DockerTestFail(msg)
             else:   # Send signal directly to the docker process
-                container_cmd._async_job.sp.send_signal(signal)
+                self.logdebug("Sending signal %s directly to container",
+                              signal)
+                os.kill(_container_pid, signal)
             if signal == 9 or signal is None:   # SIGTERM
-                for _ in xrange(50):
+                for _ in xrange(50):    # wait for command to finish
                     if container_cmd.done:
                         break
                     time.sleep(0.1)
@@ -287,7 +289,7 @@ class kill_check_base(kill_base):
                                                    " finish when kill -9 "
                                                    "was executed.")
                 self.sub_stuff['container_results'] = container_cmd.wait()
-            elif signal == 19:    # SIGSTOP can't be cought
+            elif signal == 19:    # SIGSTOP can't be caught
                 if stopped_log is False:
                     stopped_log = set()
             elif signal == 18:  # SIGCONT, check previous payload
@@ -308,11 +310,13 @@ class kill_check_base(kill_base):
                         except ValueError:
                             pass
                     else:
-                        msg = ("Check line not in docker output, signal "
-                               "was probably not passed/handled properly."
-                               "\nmissing: %s\nstopped_log: %s\n"
-                               "docker_output: %s"
-                               % (line, stopped_log, container_out.get(_idx)))
+                        msg = ("Not all signals were handled inside container "
+                               "after SIGCONT execution.\nExpected output "
+                               "(unordered):\n  %s\nActual container output:\n"
+                               "  %s\nFirst missing line:\n  %s"
+                               % ("\n  ".join([_check % sig
+                                               for sig in stopped_log]),
+                                  "\n  ".join(container_out.get(_idx)), line))
                         raise xceptions.DockerTestFail(msg)
                 stopped_log = False
             elif stopped_log is not False:  # if not false it's set()
@@ -328,10 +332,10 @@ class kill_check_base(kill_base):
                 output_matches = lambda: check in container_out.get(_idx)
                 # Wait until the signal gets logged
                 if wait_for(output_matches, timeout, step=0) is None:
-                    msg = ("Check line not in docker output, signal was "
-                           "probably not passed/handled properly.\n"
-                           "check: %s\noutput:%s"
-                           % (check, container_out.get(_idx)))
+                    msg = ("Signal %s not handled inside container.\nExpected "
+                           "output:\n  %s\nActual container output:\n  %s"
+                           % (signal, check,
+                              "\n  ".join(container_out.get(_idx))))
                     raise xceptions.DockerTestFail(msg)
 
 
@@ -373,332 +377,3 @@ class random_name(kill_check_base):
     5) analyze results
     """
     pass
-
-
-class sigstop(kill_check_base):
-
-    """
-    Test usage of docker 'kill' command (stopped container)
-
-    initialize:
-    1) start VM with test command
-    2) create sequence of signals in this manner (uses numeric values):
-       [SIGSTOP, 1, 2, 3, .., 8, 10, .., 16, SIGSTOP, 20, .., 31, SIGCONT, 9]
-    run_once:
-    3) execute series of kill signals followed with the output check
-    3b) in case of SIGSTOP it stores following signals until SIGCONT and
-        verifies they were all handled properly
-    4) sends docker kill -9 and verifies docker was killed
-    postprocess:
-    5) analyze results
-    """
-
-    def _populate_kill_cmds(self, extra_subargs):
-        signals_sequence = range(1, 32)
-        signals_sequence.remove(9)
-        signals_sequence.remove(17)
-        signals_sequence.remove(18)
-
-        # TODO: Should these be ignored? They can be caught when not STOPPED
-        # signals_sequence.remove(20)
-        # signals_sequence.remove(21)
-        # signals_sequence.remove(22)
-
-        signals_sequence = [19] + signals_sequence + [18, 9]
-        kill_cmds = []
-        for signal in signals_sequence:
-            subargs = (["%s%s" % (random.choice(('-s ', '--signal=')), signal)]
-                       + extra_subargs)
-            kill_cmds.append(DockerCmd(self.parent_subtest, 'kill', subargs))
-
-        self.logdebug("kill_command_example: %s", kill_cmds[0])
-        self.logdebug("signals_sequence: %s", signals_sequence)
-        self.sub_stuff['signals_sequence'] = signals_sequence
-        self.sub_stuff['kill_cmds'] = kill_cmds
-
-
-class bad(kill_check_base):
-
-    """
-    Test usage of docker 'kill' command (bad signals)
-
-    initialize:
-    1) start VM with test command
-    2) create sequence of signals, where first and last ones are correct,
-       other signals are mix of various incorrect names and values.
-    run_once:
-    3) execute series of kill signals followed with the output check
-    4) sends docker kill -9 and verifies docker was killed
-    postprocess:
-    5) analyze results
-    """
-
-    def _populate_kill_cmds(self, extra_subargs):
-        # TODO: 0 is accepted even thought it's bad signal
-        signals_sequence = ['USR1', 0, -1, -random.randint(2, 32767),
-                            random.randint(32, 63), random.randint(64, 32767),
-                            "SIGBADSIGNAL", "SIG", "%", "!", "\\", '', "''",
-                            '""', ' ']
-        signals_sequence = signals_sequence + [9]
-        kill_cmds = []
-        for signal in signals_sequence:
-            subargs = (["%s%s" % (random.choice(('-s ', '--signal=')), signal)]
-                       + extra_subargs)
-            kill_cmds.append(DockerCmd(self.parent_subtest, 'kill', subargs))
-
-        # Change signals_sequence into results-like numbers
-        # -1 => incorrect signal, otherwise signal number
-        signals_sequence = [-1] * len(signals_sequence)
-        signals_sequence[0] = 10
-        signals_sequence[-2] = 10
-        signals_sequence[-1] = 9
-        self.logdebug("kill_command_example: %s", kill_cmds[0])
-        self.logdebug("signals_sequence: %s", signals_sequence)
-        self.sub_stuff['signals_sequence'] = signals_sequence
-        self.sub_stuff['kill_cmds'] = kill_cmds
-
-
-class stress(kill_base):
-
-    """
-    Test usage of docker 'kill' command (lots of various kills and then check)
-
-    initialize:
-    1) start VM with test command
-    2) create sequence of signals and prepare bash script, which executes them
-       quickly one by one.
-    run_once:
-    3) executes the bash script, which executes series of kills quickly.
-    4) sends docker kill -9 and verifies docker was killed
-    postprocess:
-    5) analyze results
-    """
-
-    def _populate_kill_cmds(self, extra_subargs):
-        sequence = self._create_kill_sequence()
-        signals_set = set()
-        signals_sequence = []
-        stopped = False
-        mapped = False
-        sigproxy = self.config.get('kill_sigproxy')
-        for item in sequence:
-            if item == "M":
-                mapped = True
-            elif item == "L":   # Long is ignored in this test
-                pass
-            else:
-                signal = int(item)
-                if signal == 18:
-                    if stopped:
-                        signals_set.add(stopped)
-                    stopped = False
-                    signals_set.add(signal)
-                elif signal == 19:
-                    stopped = set()
-                else:
-                    signals_set.add(str(signal))
-                if mapped:
-                    signal = SIGNAL_MAP.get(signal, signal)
-                    mapped = False
-                signals_sequence.append(str(signal))
-
-        subargs = ["-s $SIGNAL"] + extra_subargs
-        if sigproxy:
-            pid = self.sub_stuff['container_cmd'].process_id
-            cmd = "kill -$SIGNAL %s" % pid
-        else:
-            cmd = DockerCmd(self.parent_subtest, 'kill', subargs).command
-        cmd = ("for SIGNAL in %s; do %s || exit 255; done"
-               % (" ".join(signals_sequence), cmd))
-        self.sub_stuff['kill_cmds'] = [cmd]
-        # kill -9
-        if sigproxy:
-            self.sub_stuff['kill_cmds'].append(False)
-        else:
-            self.sub_stuff['kill_cmds'].append(DockerCmd(self.parent_subtest,
-                                                         'kill',
-                                                         extra_subargs))
-        self.sub_stuff['signals_set'] = signals_set
-
-        self.logdebug("kill_command: %s", cmd)
-        self.logdebug("signals_sequence: %s", " ".join(sequence))
-
-    def run_once(self):
-        # Execute the kill command
-        super(stress, self).run_once()
-        container_cmd = self.sub_stuff['container_cmd']
-        kill_cmds = self.sub_stuff['kill_cmds']
-        signals_set = self.sub_stuff['signals_set']
-        timeout = self.config['stress_cmd_timeout']
-        _check = self.config['check_stdout']
-        self.sub_stuff['kill_results'] = [utils.run(kill_cmds[0],
-                                                    verbose=True)]
-        endtime = time.time() + timeout
-        line = None
-        out = None
-        while endtime > time.time():
-            try:
-                out = container_cmd.stdout.splitlines()
-                for line in [_check % sig for sig in signals_set]:
-                    out.remove(line)
-                break
-            except ValueError:
-                pass
-        else:
-            msg = ("Check line not in docker output, signal "
-                   "was probably not passed/handled properly."
-                   "\nmissing: %s\nexpected_signals: %s\n"
-                   "docker_output: %s"
-                   % (line, signals_set, container_cmd.stdout))
-            raise xceptions.DockerTestFail(msg)
-        # Kill -9
-        if kill_cmds[1] is not False:   # Custom kill command
-            self.sub_stuff['kill_results'].append(kill_cmds[1].execute())
-        else:   # kill the container process
-            container_cmd._async_job.sp.send_signal(9)
-        for _ in xrange(50):
-            if container_cmd.done:
-                break
-            time.sleep(0.1)
-        else:
-            raise xceptions.DockerTestFail("Container process did not"
-                                           " finish when kill -9 "
-                                           "was executed.")
-        self.sub_stuff['container_results'] = container_cmd.wait()
-
-
-class parallel_stress(kill_base):
-
-    """
-    Test usage of docker 'kill' command (simultaneous kills)
-
-    initialize:
-    1) start VM with test command
-    2) creates command for each signal, which kills the docker in a loop
-    run_once:
-    3) executes all the kill scripts to run in parallel
-    4) stops the kill scripts
-    5) sends docker kill -9 and verifies docker was killed
-    postprocess:
-    6) analyze results
-    """
-
-    def _populate_kill_cmds(self, extra_subargs):
-        signals = [int(sig) for sig in self.config['kill_signals'].split()]
-        signals = range(*signals)
-        for noncatchable_signal in (9, 17):
-            try:
-                signals.remove(noncatchable_signal)
-            except ValueError:
-                pass
-
-        cmds = []
-        for signal in signals:
-            subargs = ["-s %s" % signal] + extra_subargs
-            docker_cmd = DockerCmd(self.parent_subtest, 'kill', subargs)
-            cmd = ("while [ -e /var/tmp/docker_kill_stress ]; "
-                   "do %s || exit 255; done" % docker_cmd.command)
-            cmds.append(cmd)
-        self.sub_stuff['kill_cmds'] = cmds
-
-        signals.remove(19)  # SIGSTOP is also not catchable
-        self.sub_stuff['signals_set'] = signals
-
-        # kill -9
-        self.sub_stuff['kill_docker'] = DockerCmd(self.parent_subtest, 'kill',
-                                                  extra_subargs)
-
-    def run_once(self):
-        # Execute the kill command
-        super(parallel_stress, self).run_once()
-        container_cmd = self.sub_stuff['container_cmd']
-        kill_cmds = self.sub_stuff['kill_cmds']
-        signals_set = self.sub_stuff['signals_set']
-        _check = self.config['check_stdout']
-
-        # Enable stress loops
-        self.sub_stuff['touch_result'] = utils.run("touch /var/tmp/"
-                                                   "docker_kill_stress")
-        # Execute stress loops
-        self.sub_stuff['kill_jobs'] = []
-        for cmd in kill_cmds:
-            job = utils.AsyncJob(cmd, verbose=True)
-            self.sub_stuff['kill_jobs'].append(job)
-
-        # Wait test_length (while checking for failures)
-        endtime = time.time() + self.config['test_length']
-        while endtime > time.time():
-            for job in self.sub_stuff['kill_jobs']:
-                if job.sp.poll() is not None:   # process finished
-                    for job in self.sub_stuff.get('kill_jobs', []):
-                        self.logerror("cmd %s (%s)", job.command,
-                                      job.sp.poll())
-                    out = utils.run("ls /var/tmp/docker_kill_stress",
-                                    ignore_status=True).exit_status
-                    self.logerror("ls /var/tmp/docker_kill_stress (%s)", out)
-                    raise xceptions.DockerTestFail("stress command finished "
-                                                   "unexpectedly, see log for "
-                                                   "details.")
-
-        # Stop stressers
-        cmd = "rm -f /var/tmp/docker_kill_stress"
-        self.sub_stuff['rm_result'] = utils.run(cmd)
-
-        self.sub_stuff['kill_results'] = []
-        for job in self.sub_stuff['kill_jobs']:
-            try:
-                self.sub_stuff['kill_results'].append(job.wait_for(5))
-            except Exception, details:
-                self.logerror("Job %s did not finish: %s", job.command,
-                              str(details))
-        del self.sub_stuff['kill_jobs']
-
-        # Check the output
-        endtime = time.time() + self.config['stress_cmd_timeout']
-        line = None
-        out = None
-        while endtime > time.time():
-            try:
-                out = container_cmd.stdout.splitlines()
-                for line in [_check % sig for sig in signals_set]:
-                    out.remove(line)
-                break
-            except ValueError:
-                pass
-        else:
-            msg = ("Check line not in docker output, signal "
-                   "was probably not passed/handled properly."
-                   "\nmissing: %s\nexpected_signals: %s\n"
-                   "docker_output: %s"
-                   % (line, signals_set, container_cmd.stdout))
-            raise xceptions.DockerTestFail(msg)
-
-        # Kill -9
-        cmd = self.sub_stuff['kill_docker']
-        self.sub_stuff['kill_results'].append(cmd.execute())
-        for _ in xrange(50):
-            if container_cmd.done:
-                break
-            time.sleep(0.1)
-        else:
-            raise xceptions.DockerTestFail("Container process did not"
-                                           " finish when kill -9 "
-                                           "was executed.")
-        self.sub_stuff['container_results'] = container_cmd.wait()
-
-    def pre_cleanup(self):
-        if not self.sub_stuff.get('rm_result'):
-            utils.run("rm -f /var/tmp/docker_kill_stress", ignore_status=True)
-            for job in self.sub_stuff.get('kill_jobs', []):
-                try:
-                    job.wait_for(5)     # AsyncJob destroys it on timeout
-                except Exception, details:
-                    msg = ("Job %s did not finish: %s" % (job.command,
-                                                          details))
-                    raise xceptions.DockerTestFail(msg)
-        for result in ('touch_result', 'rm_result'):
-            if result in self.sub_stuff:
-                result = self.sub_stuff[result]
-                self.failif(result.exit_status != 0,
-                            "Exit status of the %s command was not 0 (%s)"
-                            % (result.command, result.exit_status))

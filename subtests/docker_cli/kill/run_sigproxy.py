@@ -1,5 +1,6 @@
 from kill import kill_check_base
 
+
 class run_sigproxy(kill_check_base):
 
     """

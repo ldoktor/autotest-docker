@@ -1,4 +1,4 @@
-from kill import stress
+from stress import stress
 
 
 class run_sigproxy_stress(stress):
