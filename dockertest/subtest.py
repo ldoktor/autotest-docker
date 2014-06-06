@@ -66,6 +66,10 @@ class Subtest(test.test):
     #: Subtest's config
     config = None
 
+    #: Dictionary of stringalizable items, which must be printed during
+    #: cleanup. This is intended for unexpected exceptions.
+    log_in_cleanup = {}
+
     def __init__(self, *args, **dargs):
 
         def _make_cfgsect():
@@ -181,6 +185,14 @@ class Subtest(test.test):
         Called after all other methods, even if exception is raised.
         """
         self.loginfo("cleanup()")
+        if self.log_in_cleanup:
+            self.logwarning("There are some uncleaned objects left:")
+            try:
+                while True:
+                    item = self.log_in_cleanup.popitem()
+                    self.logwarning("%s: %s" % item)
+            except KeyError:
+                pass
 
     # Some convenience methods for tests to use
 
@@ -299,6 +311,10 @@ class SubSubtest(object):
     #: re-assign it to any other type as needed.
     sub_stuff = None
 
+    #: Dictionary of stringalizable items, which must be printed during
+    #: cleanup. This is intended for unexpected exceptions.
+    log_in_cleanup = {}
+
     def __init__(self, parent_subtest):
         # Allow parent_subtest to use any interface this
         # class is setup to support. Don't check type.
@@ -385,6 +401,14 @@ class SubSubtest(object):
         """
         self.loginfo("cleanup()")
         # tmpdir is cleaned up automatically by harness
+        if self.log_in_cleanup:
+            self.logwarning("There are some uncleaned objects left:")
+            try:
+                while True:
+                    item = self.log_in_cleanup.popitem()
+                    self.logwarning("%s: %s" % item)
+            except KeyError:
+                pass
 
     # Handy to have here also
     failif = staticmethod(Subtest.failif)
