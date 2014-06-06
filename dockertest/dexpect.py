@@ -17,6 +17,9 @@ import tempfile
 import time
 
 
+STORE = -1
+
+
 class ExpectError(Exception):
 
     """
@@ -222,6 +225,9 @@ class Expect(object):
         self._log_records = None
         if not log_func:    # non-verbose
             self._log = None
+        elif log_func == STORE:
+            self._log_records = []
+            self._log = lambda msg: self._log_records.append(msg)
         else:
             assert hasattr(log_func, '__call__'), ("logging function has to be"
                                                    " a function (%s)"
@@ -239,6 +245,18 @@ class Expect(object):
         else:
             for line in data.splitlines():
                 self._log("%s%s: %s" % (prefix, self.name, line))
+
+    def get_log_records(self):
+        """
+        When STORE function for logging is used, this returns the stored
+        messages.
+        :return: all stored messages or None
+        """
+        if isinstance(self._log_records, list):
+            return "\n".join(self._log_records)
+        else:
+            return "Log not stored, use session.set_logging(dexpect.STORE)"
+
     def get_pid(self):
         """
         Returns pid of the main command.
