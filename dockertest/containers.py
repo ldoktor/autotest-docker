@@ -26,9 +26,107 @@ Where/when ***possible***, both parameters and return values follow this order:
 import json
 from autotest.client import utils
 from autotest.client.shared import error
+from images import DockerImage
 from images import DockerImages
 from output import OutputGood
 from output import TextTable
+import dockercmd
+from dockertest import dexpect
+import time
+import itertools
+
+
+MANAGED_CONTAINERS = None
+
+
+class CombinedConfig(object):
+    """
+    This class combines multiple configs in this way:
+    1) override[$key]
+    2) config[$key_$obj_name]
+    3) config[$key]
+
+    :param override: 1st level dictionarry
+    :param config: 2nd level config (which might contain '_$obj_name' keys)
+    :param obj_name: object name
+    """
+    def __init__(self, override, config, obj_name):
+        self.override = override
+        self.config = config
+        self.obj_name = obj_name
+
+    def __getitem__(self, key):
+        if key in self.override:
+            return self.override['key']
+        elif key + '_' + self.obj_name in self.config:
+            return self.config[key + '_' + self.obj_name]
+        else:
+            return self.config[key]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def get_is_enabled(self, key, default=None):
+        """
+        :return: True when key is non-zero and doesn't containe false (case
+                 insensitive) (eg. -d => true, --detached=false => false)
+        """
+        return self.is_enabled(self.get(key, default))
+
+    @staticmethod
+    def is_enabled(value, default=False):
+        """
+        :return: True when key is non-zero and doesn't containe false (case
+                 insensitive) (eg. -d => true, --detached=false => false)
+        """
+        if value is None:
+            return default
+        elif not value or "false" in str(value).lower():
+            return False
+        else:
+            return True
+
+
+class ContainerManager(object):
+    def __init__(self):
+        self.with_process = {}
+        self.without_process = {}
+
+    def __getitem__(self, key):
+        try:
+            return self.with_process[key]
+        except KeyError:
+            return self.without_process[key]
+
+    def __iter__(self):
+        return itertools.chain(self.with_process.itervalues(),
+                               self.without_process.itervalues())
+
+    def __contains__(self, key):
+        return key in self.with_process or key in self.without_process
+
+    def manage(self, dst):
+        container = {}
+        for container in self.with_process.itervalues():
+            if container.get('long_id'):   # Match by long_id
+                if container['long_id'] == dst.long_id:
+                    break
+                else:
+                    continue
+            elif container.get('name'):    # Match by name
+                if container['name'] == dst.container_name:
+                    break
+                else:
+                    continue
+        else:   # No match, no changes
+            return
+        dst.dtest_params = container
+
+
+MANAGED_CONTAINERS = ContainerManager()
 
 
 # Many attributes simply required here
@@ -40,7 +138,8 @@ class DockerContainer(object):  # pylint: disable=R0902
 
     #: There will likely be many instances, limit memory consumption.
     __slots__ = ["image_name", "command", "ports", "container_name",
-                 "long_id", "created", "status", "size"]
+                 "long_id", "created", "status", "size", "tty", "dtest_params",
+                 "subtest"]
 
     def __init__(self, image_name, command, ports=None, container_name=None):
         """
@@ -63,6 +162,10 @@ class DockerContainer(object):  # pylint: disable=R0902
         self.created = None
         self.status = None
         self.size = None
+        self.tty = None
+        # Managed containers variables
+        self.dtest_params = {}
+        self.subtest = None
 
     def __eq__(self, other):
         """
@@ -114,6 +217,58 @@ class DockerContainer(object):  # pylint: disable=R0902
         """
         return self.container_name == str(container_name)
 
+    def get_identifier(self):
+        """
+        Returns container identifier (long id, name or Exception)
+        :return: docker identifier
+        :raise KeyError: When container has no valid name
+        """
+        if self.long_id:
+            return self.long_id
+        elif self.container_name:
+            return self.container_name
+        else:
+            raise KeyError("Container %s has no valid identifier (id, name)"
+                           % self)
+
+    def is_alive(self):
+        """
+        :return: True when container is alive
+        """
+        cmd = dockercmd.DockerCmd(self.subtest, "inspect",
+                                  ["-f", "'{{.State.Running}}'",
+                                   self.get_identifier()])
+        out = cmd.execute().stdout
+        if "true" in out.lower():
+            return True
+        else:
+            return False
+
+    def get_main_session(self):
+        """
+        Returns the main session
+        :note: Returns None on container started in detached mode
+        """
+        return self.dtest_params['main_process']
+
+    def get_session(self, name, args=None, log_func=True):
+        """
+        Attaches the container and returns dexpect session
+        :params name: Name of the session (used as logging prefix)
+        :params args: Additional arguments passed to docker attach $name
+        :param log_func: Function used for output logging (True=logging.debug)
+        :returns: dexpect.ShellSession
+        """
+        if not args:
+            args = []
+        if log_func is True:    # True -> use subtest.logdebug
+            log_func = self.subtest.logdebug
+        args.append(self.get_identifier())
+        cmd = dockercmd.DockerCmdBase(self.subtest, "attach",
+                                      args)
+        return dexpect.ShellSession(cmd.command, tty=self.dtest_params['tty'],
+                                    name=name, log_func=log_func)
+
 
 class DockerContainersBase(object):
 
@@ -139,6 +294,9 @@ class DockerContainersBase(object):
 
     # abstract methods need not worry about methods that could be functions
     # pylint: disable=R0201
+
+    # Containers managed by DockerContainers
+    managed_containers = ContainerManager()
 
     def __init__(self, subtest, timeout, verbose):
         """
@@ -396,6 +554,107 @@ class DockerContainersBase(object):
         else:
             raise ValueError("Multiple containers found with name: %s" % cnts)
 
+    def get_container_by_dname(self, dname, timeout=60):
+        """
+        Return container for given docker-test name.
+        :param dname: docker name
+        :param timeout: How long to wait until it's visible to `docker ps`
+        :raise KeyError: When `dname` not found in the list of all containers
+        """
+        if dname not in MANAGED_CONTAINERS:
+            raise KeyError("Container %s not managed by DockerContainers(%s)"
+                           % (dname, MANAGED_CONTAINERS))
+        stop_time = time.time() + timeout
+        while time.time() < stop_time:
+            containers = self.list_containers()
+            for container in containers:
+                if container.dtest_params['dname'] == dname:
+                    return container
+        KeyError("Container %s not found in list of all containers in %ss"
+                 % (dname, timeout))
+
+    # TODO: Remove config argument when `DockerContainers` accepts SubSubtest
+    def create_docker_cfg(self, dname, override=None, log_func=True,
+                          config=None):
+        """
+        Creates docker container in a standard way using Test.config arguments
+
+        config:
+          container_options_csv - comma separated list of docker run arguments
+          container_name - desired name (when true/yes, it's generated)
+          container_name_prefix - name prefix used when container_name is true
+          container_detached - container in detached mode (full command needed)
+          container_tty - container uses tty (full command needed)
+          container_command - container's main command
+
+        :param dname: docker-test-name (in-config-name, not necessarily the
+                      actual container name)
+        :param override: dictionary which overrides $config values
+        :param log_func: In non-detached mode sets the logging function of
+                         the main process
+        :returns: DockerContainer object
+        """
+        if log_func is True:    # True -> use subtest.logdebug
+            log_func = self.subtest.logdebug
+
+        container = {'dname': dname}
+        if not override:
+            override = {}
+        config = CombinedConfig(override, config, dname)
+        subargs = config.get('container_options_csv')
+        if subargs:
+            subargs = [arg for arg in subargs.split(',')]
+        else:
+            subargs = []
+        name = config.get('container_name')
+        if name is True:
+            prefix = config.get('container_name_prefix')
+            name = self.get_unique_name(prefix, length=4)
+        if name:
+            subargs.append('--name %s' % name)
+            container['name'] = name
+        detached = config.get('container_detached')
+        if detached:
+            subargs.append(detached)
+        tty = config.get('container_tty')
+        if tty:
+            subargs.append(tty)
+        image = DockerImage.full_name_from_defaults(self.subtest.config)
+        subargs.append(image)
+        exec_cmd = config.get('container_command')
+        if exec_cmd:
+            subargs.append('bash')
+            subargs.append('-c')
+            subargs.append(exec_cmd)
+            exec_cmd = 'bash -c %s' % exec_cmd
+        # Store container's configs
+        container['tty'] = config.is_enabled(tty, False)
+        # Execute container
+        if config.is_enabled(detached, False):
+            cmd = dockercmd.NoFailDockerCmd(self.subtest, 'run', subargs)
+            container['long_id'] = cmd.execute().stdout.strip()
+            MANAGED_CONTAINERS.without_process[dname] = container
+        else:
+            cmd = dockercmd.DockerCmdBase(self.subtest, 'run', subargs)
+            cmd = dexpect.ShellSession(cmd.command, name=dname,
+                                       tty=container['tty'], log_func=log_func)
+            container['main_process'] = cmd
+            MANAGED_CONTAINERS.with_process[dname] = container
+
+    def cleanup_managed_containers(self):
+        """
+        Removes all containers created via DockerContainers
+        """
+        failed = []
+        for container in MANAGED_CONTAINERS:
+            if container.get('long_id'):
+                self.remove_by_id(container.get('long_id'))
+            elif container.get('name'):
+                self.remove_by_name(container.get('name'))
+            else:
+                failed.append(container.get('dname'))
+        self.subtest.failif(failed, "Fail to cleanup %s containers")
+
 
 class DockerContainersCLI(DockerContainersBase):
 
@@ -440,12 +699,14 @@ class DockerContainersCLI(DockerContainersBase):
         dcntr.long_id = row['CONTAINER ID']
         dcntr.created = row['CREATED']
         dcntr.status = row['STATUS']
+        dcntr.subtest = self.subtest
         if self.get_size:
             # Raise documented get_container_list() exception
             try:
                 dcntr.size = row['SIZE']  # throw
             except KeyError:
                 raise ValueError("No size data present in table!")
+        MANAGED_CONTAINERS.manage(dcntr)
         return dcntr
 
     # private methods don't need docstrings
