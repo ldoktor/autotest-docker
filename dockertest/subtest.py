@@ -51,6 +51,10 @@ class SubBase(object):
     n_spaces = 16  # date/timestamp length
     n_tabs = 1     # one-level
 
+    #: Dictionary of stringalizable items, which must be printed during
+    #: cleanup. This is intended for unexpected exceptions.
+    log_in_cleanup = {}
+
     def initialize(self):
 
         """
@@ -82,6 +86,14 @@ class SubBase(object):
         """
 
         self.loginfo("cleanup()")
+        if self.log_in_cleanup:
+            self.logwarning("There are some uncleaned objects left:")
+            try:
+                while True:
+                    item = self.log_in_cleanup.popitem()
+                    self.logwarning("%s: %s" % item)
+            except KeyError:
+                pass
 
     @staticmethod
     def failif(condition, reason=None):
