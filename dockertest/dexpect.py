@@ -199,6 +199,7 @@ class Expect(object):
         self.set_logging(log_func)
         self.time_start = time.time()
         (self._pty, slave) = os.openpty()
+        self.log("Executing session: ", command)
         self._sp = subprocess.Popen(command, stdin=slave,
                                     stdout=slave,
                                     stderr=slave,
