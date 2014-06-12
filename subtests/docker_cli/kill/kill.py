@@ -119,7 +119,7 @@ class kill_base(subtest.SubSubtest):
         if not self.config.get('signals_sequence'):
             sequence = []
             signals = [int(sig) for sig in self.config['kill_signals'].split()]
-            signals = range(*signals)
+            signals = range(*signals)   # pylint: disable=W0142
             skipped_signals = (int(_) for _ in
                                self.config.get('skip_signals', "").split())
             for skipped_signal in skipped_signals:
@@ -223,7 +223,9 @@ class kill_base(subtest.SubSubtest):
         for method in ('pre_cleanup', 'container_cleanup'):
             try:
                 getattr(self, method)()
-            except Exception, details:
+            except (xceptions.AutotestError, xceptions.DockerExecError,
+                    xceptions.DockerTestError, KeyError, ValueError,
+                    IOError), details:
                 cleanup_log.append("%s failed: %s" % (method, details))
         if cleanup_log:
             msg = "Cleanup failed:\n%s" % "\n".join(cleanup_log)
@@ -236,7 +238,7 @@ class kill_check_base(kill_base):
     """ Base class for signal-check based tests """
 
     def run_once(self):
-        class Output:
+        class Output(object):
 
             def __init__(self, container):
                 self.container = container
@@ -276,8 +278,8 @@ class kill_check_base(kill_base):
                               self.sub_stuff['kill_results'][-1].exit_status))
                     raise xceptions.DockerTestFail(msg)
             else:   # Send signal directly to the docker process
-                self.logdebug("Sending signal %s directly to container",
-                              signal)
+                self.logdebug("Sending signal %s directly to container pid %s",
+                              signal, _container_pid)
                 os.kill(_container_pid, signal)
             if signal == 9 or signal is None:   # SIGTERM
                 for _ in xrange(50):    # wait for command to finish
@@ -323,7 +325,8 @@ class kill_check_base(kill_base):
                 if cmd is not False:
                     # Using docker kill: signals are forwarded when the cont
                     #                    is ready
-                    stopped_log.add(signal)
+                    # disable E1101, when stopped_log is not False, it's []
+                    stopped_log.add(signal)  # pylint: disable=E1101
                 # else: using proxy:  signals are not forwarded by proxy, when
                 #                     proxy is SIGSTOPped.
             else:
