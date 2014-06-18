@@ -65,7 +65,8 @@ class stress(kill_base):
         else:
             self.sub_stuff['kill_cmds'].append(DockerCmd(self.parent_subtest,
                                                          'kill',
-                                                         extra_subargs))
+                                                         extra_subargs,
+                                                         verbose=False))
         self.sub_stuff['signals_set'] = signals_set
 
         self.logdebug("kill_command: %s", cmd)

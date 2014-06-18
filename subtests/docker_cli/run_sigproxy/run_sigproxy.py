@@ -32,9 +32,9 @@ class sigproxy_base(SubSubtest):
     """ Base class """
 
     def _init_container_normal(self, name):
-        if self.config.get('run_options_csv'):
+        if self.sub_stuff.get('run_options_csv'):
             subargs = [arg for arg in
-                       self.config['run_options_csv'].split(',')]
+                       self.sub_stuff['run_options_csv'].split(',')]
         else:
             subargs = []
         subargs.append("--name %s" % name)
@@ -48,9 +48,9 @@ class sigproxy_base(SubSubtest):
         container.execute()
 
     def _init_container_attached(self, name):
-        if self.config.get('run_options_csv'):
+        if self.sub_stuff.get('run_options_csv'):
             subargs = [arg for arg in
-                       self.config['run_options_csv'].split(',')]
+                       self.sub_stuff['run_options_csv'].split(',')]
         else:
             subargs = []
         subargs.append("--name %s" % name)
@@ -63,9 +63,9 @@ class sigproxy_base(SubSubtest):
         self.sub_stuff['container_cmd'] = container
         container.execute()
 
-        if self.config.get('attach_options_csv'):
+        if self.sub_stuff.get('attach_options_csv'):
             subargs = [arg for arg in
-                       self.config['attach_options_csv'].split(',')]
+                       self.sub_stuff['attach_options_csv'].split(',')]
         else:
             subargs = []
         subargs.append(name)
@@ -73,8 +73,13 @@ class sigproxy_base(SubSubtest):
         self.sub_stuff['container_cmd'] = container  # overwrites finished cmd
         container.execute()
 
+    def init_test_specific_variables(self):
+        raise NotImplementedError("Test specific variables has to be "
+                                  "overridden by child.")
+
     def initialize(self):
         super(sigproxy_base, self).initialize()
+        self.init_test_specific_variables()
         self.sub_stuff['container_name'] = None     # tested container name
         self.sub_stuff['container_cmd'] = None      # tested container cmd
         self.sub_stuff['kill_signals'] = None        # testing kill signal
@@ -82,11 +87,10 @@ class sigproxy_base(SubSubtest):
         self.sub_stuff['check_stdout'] = self.config['check_stdout']
         config.none_if_empty(self.config)
         # Prepare a container
-        prefix = self.config["container_name_prefix"]
         docker_containers = DockerContainers(self.parent_subtest)
-        name = docker_containers.get_unique_name(prefix, length=4)
+        name = docker_containers.get_unique_name("test", length=4)
         self.sub_stuff['container_name'] = name
-        if self.config.get('run_container_attached'):
+        if self.sub_stuff['attached']:
             self._init_container_attached(name)
         else:
             self._init_container_normal(name)
@@ -104,26 +108,14 @@ class sigproxy_base(SubSubtest):
         for signal in self.sub_stuff['kill_signals']:
             if wait_between_kill:
                 time.sleep(wait_between_kill)
+            # Special case, no need to put this in FW; pylint: disable=W0212
             container_cmd._async_job.sp.send_signal(signal)
+            # pylint: enable=W0212
 
-    def _check_negative(self):
-        container_cmd = self.sub_stuff['container_cmd']
-        endtime = time.time() + 5
-        line = None
-        out = None
-        check_line = self.sub_stuff['check_stdout']
-        bad_lines = [check_line % sig for sig
-                     in self.sub_stuff['kill_signals']]
-        while endtime > time.time():
-            out = container_cmd.stdout.splitlines()
-            for line in bad_lines:
-                if line in out:
-                    msg = ("Signal was raised in container even though "
-                           "sig-proxy was disabled:\ncontainer_out:\n%s"
-                           % out)
-                    raise DockerTestFail(msg)
-
-    def _check_positive(self):
+    def _check_results(self):
+        """
+        Verify that expected message was raised in the output
+        """
         container_cmd = self.sub_stuff['container_cmd']
         endtime = time.time() + 5
         line = None
@@ -146,10 +138,7 @@ class sigproxy_base(SubSubtest):
 
     def postprocess(self):
         super(sigproxy_base, self).postprocess()
-        if self.sub_stuff['negative_test']:
-            self._check_negative()
-        else:
-            self._check_positive()
+        self._check_results()
 
         # stop the container
         container_name = self.sub_stuff['container_name']
@@ -164,7 +153,9 @@ class sigproxy_base(SubSubtest):
         # In case of internal failure the running container might not finish.
         failures = []
         container_cmd = self.sub_stuff.get('container_cmd')
-        if container_cmd and not container_cmd.done:
+        # container_cmd might be temporarily NoFailDockerCmd
+        if (container_cmd and hasattr(container_cmd, 'done')
+            and not container_cmd.done):
             try:
                 utils.signal_pid(container_cmd.process_id, 15)
                 if not container_cmd.done:
@@ -181,6 +172,36 @@ class sigproxy_base(SubSubtest):
         self.failif(failures, "\n".join(failures))
 
 
+class sigproxy_disabled_base(sigproxy_base):
+    """
+    The same test as sixproxy_base, but with sig-proxy disabled (this version
+    expects signals not to be passed to the container)
+    """
+    def init_test_specific_variables(self):
+        raise NotImplementedError("Test specific variables has to be "
+                                  "overridden by child.")
+
+    def _check_results(self):
+        """
+        Verify, that expected message is NOT present in the container output.
+        """
+        container_cmd = self.sub_stuff['container_cmd']
+        endtime = time.time() + 5
+        line = None
+        out = None
+        check_line = self.sub_stuff['check_stdout']
+        bad_lines = [check_line % sig for sig
+                     in self.sub_stuff['kill_signals']]
+        while endtime > time.time():
+            out = container_cmd.stdout.splitlines()
+            for line in bad_lines:
+                if line in out:
+                    msg = ("Signal was raised in container even though "
+                           "sig-proxy was disabled:\ncontainer_out:\n%s"
+                           % out)
+                    raise DockerTestFail(msg)
+
+
 class default(sigproxy_base):
 
     """
@@ -188,25 +209,34 @@ class default(sigproxy_base):
     * default is tty=false, sig-proxy=true
     * all signals should be forwarded properly
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = False
+        self.sub_stuff['run_options_csv'] = ""
+        self.sub_stuff['attach_options_csv'] = ""
 
 
-class tty_on_proxy_on(sigproxy_base):
+class tty_on_proxy_on(sigproxy_disabled_base):
 
     """
     Test usage of docker run/attach with/without '--sig-proxy'
     * tty should force-disable sig-proxy thus no signals should be forwarded
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = False
+        self.sub_stuff['run_options_csv'] = "--tty=true,--sig-proxy=true"
+        self.sub_stuff['attach_options_csv'] = ""
 
 
-class tty_on_proxy_off(sigproxy_base):
+class tty_on_proxy_off(sigproxy_disabled_base):
 
     """
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = False
+        self.sub_stuff['run_options_csv'] = "--tty=true,--sig-proxy=false"
+        self.sub_stuff['attach_options_csv'] = ""
 
 
 class tty_off_proxy_on(sigproxy_base):
@@ -215,16 +245,22 @@ class tty_off_proxy_on(sigproxy_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * all signals should be forwarded properly
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = False
+        self.sub_stuff['run_options_csv'] = "--tty=false,--sig-proxy=true"
+        self.sub_stuff['attach_options_csv'] = ""
 
 
-class tty_off_proxy_off(sigproxy_base):
+class tty_off_proxy_off(sigproxy_disabled_base):
 
     """
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = False
+        self.sub_stuff['run_options_csv'] = "--tty=false,--sig-proxy=false"
+        self.sub_stuff['attach_options_csv'] = ""
 
 
 class attach_default(sigproxy_base):
@@ -234,25 +270,34 @@ class attach_default(sigproxy_base):
     * default is tty=false, sig-proxy=true
     * all signals should be forwarded properly
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = True
+        self.sub_stuff['run_options_csv'] = "--detach"
+        self.sub_stuff['attach_options_csv'] = ""
 
 
-class attach_tty_on_proxy_on(sigproxy_base):
+class attach_tty_on_proxy_on(sigproxy_disabled_base):
 
     """
     Test usage of docker run/attach with/without '--sig-proxy'
     * tty should force-disable sig-proxy thus no signals should be forwarded
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = True
+        self.sub_stuff['run_options_csv'] = "--tty=true,--detach"
+        self.sub_stuff['attach_options_csv'] = "--sig-proxy=true"
 
 
-class attach_tty_on_proxy_off(sigproxy_base):
+class attach_tty_on_proxy_off(sigproxy_disabled_base):
 
     """
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = True
+        self.sub_stuff['run_options_csv'] = "--tty=true,--detach"
+        self.sub_stuff['attach_options_csv'] = "--sig-proxy=false"
 
 
 class attach_tty_off_proxy_on(sigproxy_base):
@@ -261,13 +306,19 @@ class attach_tty_off_proxy_on(sigproxy_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * all signals should be forwarded properly
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = True
+        self.sub_stuff['run_options_csv'] = "--tty=false,--detach"
+        self.sub_stuff['attach_options_csv'] = "--sig-proxy=true"
 
 
-class attach_tty_off_proxy_off(sigproxy_base):
+class attach_tty_off_proxy_off(sigproxy_disabled_base):
 
     """
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
-    pass
+    def init_test_specific_variables(self):
+        self.sub_stuff['attached'] = True
+        self.sub_stuff['run_options_csv'] = "--tty=false,--detach"
+        self.sub_stuff['attach_options_csv'] = "--sig-proxy=false"

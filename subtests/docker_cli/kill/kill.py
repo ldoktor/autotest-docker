@@ -88,8 +88,7 @@ class kill_base(subtest.SubSubtest):
         super(kill_base, self).initialize()
         # Prepare a container
         docker_containers = DockerContainers(self.parent_subtest)
-        prefix = self.config["kill_name_prefix"]
-        name = docker_containers.get_unique_name(prefix, length=4)
+        name = docker_containers.get_unique_name("test", length=4)
         self.sub_stuff['container_name'] = name
         config.none_if_empty(self.config)
         if self.config.get('run_container_attached'):
@@ -164,9 +163,8 @@ class kill_base(subtest.SubSubtest):
                     sig_long = False
                 else:
                     subargs = ["-s %s" % signal] + extra_subargs
-                kill_cmds.append(DockerCmd(self.parent_subtest,
-                                           'kill',
-                                           subargs))
+                kill_cmds.append(DockerCmd(self.parent_subtest, 'kill',
+                                           subargs, verbose=False))
 
         # Kill -9 is the last one :-)
         signal = 9
