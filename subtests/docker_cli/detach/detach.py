@@ -7,7 +7,8 @@ import time
 
 from dockertest import config, dexpect, subtest, xceptions
 from dockertest.containers import DockerContainers
-from dockertest.dockercmd import DockerCmdBase, NoFailDockerCmd
+from dockertest.dockercmd import InteractiveAsyncDockerCmd, NoFailDockerCmd
+from dockertest.dockercmd import DockerCmdBase
 from dockertest.images import DockerImage
 from autotest.client.shared import utils
 
@@ -15,6 +16,27 @@ from autotest.client.shared import utils
 def not_equal(self, first, second, iteration, msg):
     self.failif(first != second, msg + "(%s != %s, iteration %s"
                 % (first, second, iteration))
+
+
+def session_responsive(session, timeout=5, internal_timeout=1):
+    """
+    Sends `true` command and queues for output. When output obtained => True
+    :warning: Don't set internal_timeout too low unless stressed machine
+              might not response quickly enough.
+    """
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            session.cmd_status("true", internal_timeout)
+            return True
+        except dexpect.ShellError:
+            pass
+    try:    # +1 iteration in case we missed end_time of milliseconds...
+        session.cmd_status("true", internal_timeout)
+        return True
+    except dexpect.ShellError:
+        pass
+    return False
 
 
 class LogMe(object):
@@ -26,6 +48,16 @@ class LogMe(object):
 
     def __str__(self):
         return self.func()
+
+
+class InteractiveBash(InteractiveAsyncDockerCmd):
+    """
+    This test detaches from docker into bash. In order to be able to do this
+    I need to execute bash directly and then using sendline execute container
+    """
+    @property
+    def command(self):
+        return "bash -l"
 
 
 class detach(subtest.SubSubtestCaller):
@@ -69,15 +101,22 @@ class detach_base(subtest.SubSubtest):
         subargs.append("bash")
         subargs.append("-c")
         subargs.append(self.config['container_command'])
+        # full `docker run` command
         cmd = DockerCmdBase(self.parent_subtest, 'run', subargs).command
-        session = dexpect.ShellSession("bash -i", name="session1",
+        # interactive bash in AsyncDockerCmd-like object
+        dkrcmd = InteractiveBash(self.parent_subtest, 'dumm', [])
+        dkrcmd.execute()
+        # connect session to dkrcmd (we don't have tty => no echo =>
+        # is_responsive() fails. session.cmd() works fine
+        session = dexpect.ShellSession(dkrcmd, name=name, tty=False,
                                        log_func=self.sub_stuff['session_log'])
         if self.sub_stuff['session_log'] == dexpect.STORE:
             _ = session.get_log_records
             self.log_in_cleanup['session1_log'] = LogMe(_)
         self.sub_stuff['host_hostname'] = session.cmd("echo $HOSTNAME",
                                                       timeout=10)
-        session.sendline(cmd)               # start docker
+        # After this command container should be in the foreground
+        session.sendline(cmd)
         if not tty or 'false' in str(tty).lower():
             self.sub_stuff['container_is_tty'] = False
             session.set_tty(False, 0)
@@ -161,7 +200,9 @@ class basic(detach_base):
         time.sleep(1)       # FIXME: Workaround the known problem
         session.send_control('q')
         time.sleep(1)       # FIXME: Workaround the known problem
-        session.set_tty(True, 5)    # we should be in bash (tty mode)
+        session.set_tty(False, 0)    # we should be in bash (no echo, no tty)
+        self.failif(not session_responsive(session), "Session not responsive "
+                    "after returning from container to bash.")
         not_equal(self, session.cmd("echo $HOSTNAME", timeout=10),
                   self.sub_stuff['host_hostname'], "NONE", "Hostname mismatch,"
                   " docker detach probably failed.")
@@ -182,7 +223,9 @@ class basic(detach_base):
         time.sleep(1)       # FIXME: Workaround the known problem
         session.send_control('q')
         time.sleep(1)       # FIXME: Workaround the known problem
-        session.set_tty(True, 5)    # we should be in bash (tty mode)
+        session.set_tty(False, 0)    # we should be in bash (no echo, no tty)
+        self.failif(not session_responsive(session), "Session not responsive "
+                    "after returning from container to bash.")
         not_equal(self, session.cmd("echo $HOSTNAME", timeout=10),
                   self.sub_stuff['host_hostname'], "NONE", "Hostname mismatch,"
                   " docker detach probably failed.")
@@ -210,8 +253,9 @@ class basic(detach_base):
                   self.sub_stuff['container_hostname'], "NONE", "Hostname "
                   "mismatch, docker detach probably failed.")
         session.send_control('d')   # exit the container
-        session.set_tty(True, 5)    # we should be in bash (tty mode)
-
+        session.set_tty(False, 0)    # we should be in bash (no echo, no tty)
+        self.failif(not session_responsive(session), "Session not responsive "
+                    "after returning from container to bash.")
         self.loginfo("Verifying host response...")
         not_equal(self, session.cmd("echo $HOSTNAME", timeout=10),
                   self.sub_stuff['host_hostname'], "NONE", "Hostname mismatch,"
@@ -240,8 +284,9 @@ class stress(detach_base):
             time.sleep(1)       # FIXME: Workaround the known problem
             session.send_control('q')
             time.sleep(1)       # FIXME: Workaround the known problem
-            session.set_tty(True, 5)    # we should be in bash (tty mode)
-            session.cmd("true")
+            session.set_tty(False, 0)  # we should be in bash (no echo, no tty)
+            self.failif(not session_responsive(session), "Session not "
+                        "responsive after returning from container to bash.")
             not_equal(self, session.cmd("echo $HOSTNAME", timeout=10),
                       self.sub_stuff['host_hostname'], i, "Hostname mismatch, "
                       " docker detach probably failed.")
@@ -249,7 +294,6 @@ class stress(detach_base):
             # Attaching...
             session.sendline(self.sub_stuff['attach_cmd'])
             session.set_tty(self.sub_stuff['container_is_tty'], 5)
-            session.cmd("true")
             not_equal(self, session.cmd("echo $HOSTNAME", timeout=10),
                       self.sub_stuff['container_hostname'], i, "Hostname "
                       "mismatch, docker attach probably failed.")
@@ -260,7 +304,9 @@ class stress(detach_base):
         session.set_logging(self.sub_stuff['session_log'])  # Use default logs
         self.log_in_cleanup['session_output'] = session.get_log_records
         session.send_control('d')   # exit the container
-        session.set_tty(True, 5)    # we should be in bash (tty mode)
+        session.set_tty(False, 0)    # we should be in bash (no echo, no tty)
+        self.failif(not session_responsive(session), "Session not responsive "
+                    "after returning from container to bash.")
         self.loginfo("Verifying host response...")
         session.sendline()
         session.read_up_to_prompt(10)
@@ -283,14 +329,18 @@ class multi_session(detach_base):
     """
     def initialize(self):
         super(multi_session, self).initialize()
-        session2 = dexpect.ShellSession("bash -i", name="session2",
+        dkrcmd = InteractiveBash(self.parent_subtest, 'dumm', [])
+        dkrcmd.execute()
+        # connect session to dkrcmd (we don't have tty => no echo =>
+        # is_responsive() fails. session.cmd() works fine
+        name = "%s-2" % self.sub_stuff['container_name']
+        session2 = dexpect.ShellSession(dkrcmd, name=name, tty=False,
                                         log_func=self.sub_stuff['session_log'])
         if self.sub_stuff['session_log'] == dexpect.STORE:
             _ = session2.get_log_records
             self.log_in_cleanup['session2_log'] = LogMe(_)
         self.sub_stuff['session2'] = session2
         session2.sendline(self.sub_stuff['attach_cmd'])
-        session2.cmd("true")
         session2.set_tty(self.sub_stuff['container_is_tty'], 5)
         not_equal(self, session2.cmd("echo $HOSTNAME", timeout=10),
                   self.sub_stuff['container_hostname'], "<before>", "Hostname "
@@ -318,8 +368,9 @@ class multi_session(detach_base):
             session2.send_control('q')
             time.sleep(1)       # FIXME: Workaround the known problem
             # No interaction in detached session should affect container
-            session2.set_tty(True, 5)    # we should be in bash (tty mode)
-            session2.cmd("true")
+            session2.set_tty(False, 0)    # we should be in bash (no echo, no tty)
+            self.failif(not session_responsive(session2), "Session not "
+                        "responsive after returning from container to bash.")
             not_equal(self, session2.cmd("echo $HOSTNAME", timeout=10),
                       self.sub_stuff['host_hostname'], i, "Hostname mismatch, "
                       " docker detach probably failed.")
@@ -343,8 +394,9 @@ class multi_session(detach_base):
         session1.send_control('d')   # exit the container
         # Now container should finish and booth sessions should be in host bash
         for session in (session1, session2):
-            session.set_tty(True, 5)    # we should be in bash (tty mode)
-            session.cmd("true")
+            session.set_tty(False, 0)  # we should be in bash (no echo, no tty)
+            self.failif(not session_responsive(session), "Session not "
+                        "responsive after returning from container to bash.")
             not_equal(self, session.cmd("echo $HOSTNAME", timeout=10),
                       self.sub_stuff['host_hostname'], "<after>", "Hostname "
                       "mismatch, docker probably didn't finish. (%s)"

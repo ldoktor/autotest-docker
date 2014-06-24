@@ -5,15 +5,12 @@ with `docker`.
 
 :copyright: 2014 Red Hat Inc.
 """
-
-import os
 import random
 import re
 import select
 import signal
 import string
 import subprocess
-import tempfile
 import time
 
 
@@ -190,20 +187,16 @@ class Expect(object):
     :warning: It is not 100% compatible with aexpect, nor pexpect
     """
 
-    def __init__(self, command, linesep='\n', name=None,
+    def __init__(self, process, linesep='\n', name=None,
                  log_func=None):
-        assert command, "Incorrect command supplied: '%s'" % command
+        self.process = process
+        self._stdout_idx = 0
         self.linesep = linesep
-        self.command = command
         self.name = name if name else ""
+        self._log = None
+        self._log_records = None
         self.set_logging(log_func)
         self.time_start = time.time()
-        (self._pty, slave) = os.openpty()
-        self.log("Executing session: ", command)
-        self._sp = subprocess.Popen(command, stdin=slave,
-                                    stdout=slave,
-                                    stderr=slave,
-                                    shell=True, close_fds=True)
 
     def __del__(self):
         """
@@ -211,13 +204,11 @@ class Expect(object):
         """
         self.terminate()
 
-    def terminate(self):
+    def terminate(self, timeout=0):
         """
         Terminates the managed process (-15 eventually followed by -9)
         """
-        self._sp.terminate()
-        if self.is_alive():
-            self._sp.kill()
+        self.process.wait(timeout)
 
     def set_logging(self, log_func=None):
         """
@@ -228,7 +219,9 @@ class Expect(object):
             self._log = None
         elif log_func == STORE:
             self._log_records = []
+            # _log has to be a function; pylint: disable=W0108
             self._log = lambda msg: self._log_records.append(msg)
+            # pylint: enable=W0108
         else:
             assert hasattr(log_func, '__call__'), ("logging function has to be"
                                                    " a function (%s)"
@@ -263,7 +256,7 @@ class Expect(object):
         Returns pid of the main command.
         :warning: This pid might not be the current foreground process!
         """
-        return self._sp.pid
+        return self.process.process_id
 
     @staticmethod
     def get_custom_children_pids(ppid=None, line_filter=None):
@@ -298,19 +291,13 @@ class Expect(object):
         """
         True when the main process is alive
         """
-        return self._sp.poll() is None
+        return not self.process.done
 
-    def get_status(self, timeout=5):
+    def get_status(self):
         """
-        Wait for the process to exit and return its exit status, or None
-        if the exit status is not available.
-        :param timeout: Duration to wait for process to exit
+        Return exit status or None if process has not ended
         """
-        for _ in xrange(timeout * 10):
-            if self._sp.poll() is not None:
-                return self._sp.poll()
-            time.sleep(0.1)
-        return None
+        return self.process.exit_status
 
     def send(self, data):
         """
@@ -319,7 +306,7 @@ class Expect(object):
         """
         self.log(">>", data)
         while data:
-            written = os.write(self._pty, data)
+            written = self.process.stdin(data)
             data = data[written:]
         # Probably not needed, re-enable in case of weird failures
         # termios.tcflush(self._pty, termios.TCIOFLUSH)
@@ -364,20 +351,37 @@ class Expect(object):
         Sends signal to the main process
         :param sig: Which signal to send (default: signal.SIGKILL)
         """
-        if self.is_alive():
-            self._sp.send_signal(sig)
+        return self.process.kill(sig)
+
+    def _poll_stdout(self, timeout):
+        """
+        Polls for new data in stdout
+        :param timeout: How long to wait (None = inf)
+        :return: True = new data available, False = no new data
+        """
+        if timeout is None:
+            end_time = False
+        else:
+            end_time = time.time() + timeout
+        while len(self.process.stdout) <= self._stdout_idx:
+            if end_time and time.time() > end_time:
+                break
+            time.sleep(0.1)
+        else:
+            return True
+        return False
 
     def _try_read(self, timeout):
         """
         Try to read single piece of data
-        :param timeout: Maximal wait for data to occur
         :return: Read data
         """
-        read, _, _ = select.select([self._pty], [], [], timeout)
-        if read:
-            return os.read(self._pty, 1024)
-        else:
+        if not self._poll_stdout(timeout):  # No new data
             return ""
+        out = self.process.stdout
+        _idx = self._stdout_idx
+        self._stdout_idx = len(out)
+        return out[_idx:]
 
     def read_nonblocking(self, internal_timeout=None, timeout=None):
         """
@@ -504,14 +508,13 @@ class ShellSession(Expect):
     process for responsiveness.
     """
 
-    def __init__(self, command, linesep="\n", prompt=r"[\#\$]\s*$",
+    def __init__(self, process, linesep="\n", prompt=r"[\#\$]\s*$",
                  status_test_command="echo $?", tty=True, timeout=5,
                  name=None, log_func=None):
         """
         Initialize the class and run command as a child process.
 
-        :param command: Command to run, or None if accessing an already running
-                server.
+        :param process:
         :param linesep: Line separator to be appended to strings sent to the
                 child process by sendline().
         :param prompt: Regular expression describing the shell's prompt line.
@@ -525,11 +528,12 @@ class ShellSession(Expect):
         :param log_func: logging function (file.write, logging.debug, ...)
         """
         # Init the superclass
-        Expect.__init__(self, command, linesep, name, log_func)
-        # Initialize functions, which are defined in self.set_tty
+        Expect.__init__(self, process, linesep, name, log_func)
+        # Initialize functions/variables used in code
         self.prompt = None
         self.read_up_to_prompt = None
         self.get_last_status = None
+        self._return_number = None
         # Remember some attributes
         self._prompt = prompt
         self.status_test_command = status_test_command
@@ -573,7 +577,7 @@ class ShellSession(Expect):
         """
         return "".join(cont.rstrip().splitlines(True)[:-1])
 
-    def is_responsive(self, timeout=5.0):
+    def is_responsive(self, timeout=5):
         """
         Return True if the process responds to STDIN/terminal input.
 
@@ -598,7 +602,7 @@ class ShellSession(Expect):
                 return True
         # No output -- report unresponsive
         return False
-
+    
     def read_up_to_prompt_tty(self, timeout=60, internal_timeout=None):
         """
         Read using read_nonblocking until the last non-empty line of the output
@@ -710,6 +714,7 @@ class ShellSession(Expect):
                   (eg. when you use all cmd* functions)
         """
         return self._return_number
+        del internal_timeout    # unused parameter pylint: disable=W0101
 
     def cmd_status_output(self, cmd, timeout=60, internal_timeout=None):
         """
@@ -786,74 +791,3 @@ class ShellSession(Expect):
                 pass
             else:
                 raise
-
-
-if __name__ == "__main__":
-    # Demonstration
-    a = ShellSession()  # Get bash login
-    print "Starting docker ..."
-    a.sendline("docker run -t -i fedora bash")  # Start docker
-    print a.read_nonblocking(1, 10)  # see if it started
-    a.is_responsive(2)  # wait for stabilization...
-    print "PIDs"
-    print a.get_children_pids(lambda line: line[1].startswith("docker"))
-    print "Output of ls in container"
-    print a.cmd("ls")   # in docker command
-    print "Dettaching ..."
-    a.send_control('p')
-    time.sleep(1)   # Somehow docker doesn't accept ctrl+p ctrl+q without sleep
-    # termios.tcflush(a._pty, termios.TCIOFLUSH)
-    # termios.tcdrain(a._pty)
-    a.send_control('q')     # dettach
-    print a.read_nonblocking(1, 10)     # see what happened
-    a.is_responsive(2)  # wait for stabilization...
-    print "Output of ls on host"
-    print a.cmd("ls")
-    a.sendline("docker attach `docker ps -q -l`")   # attach it
-    print a.read_nonblocking(1, 10)     # see what happened
-    a.is_responsive(2)  # wait for stabilization...
-    print "PIDs"
-    print a.get_children_pids()
-    print "Output of ls in container"
-    print a.cmd("ls")
-    a.send_control('d')
-    print a.read_nonblocking(1, 10)     # see what happened
-    a.send_control('d')
-    print a.read_nonblocking(1, 10)     # see what happened
-    print "Process terminated..."
-    print a.is_alive()
-    """
-    import sys
-    sys.path.append("/opt/eclipse/plugins/org.python.pydev_2.8.2.2013081517/pysrc")
-    import pydevd
-    pydevd.settrace("127.0.0.1")
-    """
-    b = ShellSession()
-    b.cmd_output("echo ahoj; sleep 1; ls")
-    print "C"
-    b.cmd("ls")
-    print "AAA"
-    b.sendline("docker run -i fedora bash")
-    b.set_tty(False)
-    b.cmd("ls")
-    # b.cmd("ls asdfasdf")    # uncomment this to see the failure
-
-    b = ShellSession()    # No echo login
-    print "Output of ls on host"
-    print b.cmd("ls")
-    print "Starting docker ..."
-    did = b.cmd("docker run -d -i fedora bash")  # Start docker
-    print "Docker ID"
-    print did
-    print "Output of ls on host"
-    print b.cmd("ls")
-    b.sendline("docker attach %s" % did)   # attach it
-    print b.set_tty(False)
-    print b.read_nonblocking(1, 10)     # see what happened
-    print "Output of ls in container"
-    print b.cmd("ls")
-    pid = b.get_children_pids(lambda line: line[1].startswith("docker"))
-    print pid
-    b.send_control('d')
-    print b.set_tty(False)
-    print b.get_children_pids(lambda line: line[1].startswith("docker"))

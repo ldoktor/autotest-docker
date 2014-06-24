@@ -5,7 +5,8 @@ Frequently used docker CLI operations/data
 
 # Pylint runs from a different directory, it's fine to import this way
 # pylint: disable=W0403
-
+import os
+import select
 import time
 from autotest.client import utils
 from subtest import SubBase
@@ -476,3 +477,42 @@ class AsyncDockerCmd(DockerCmdBase):
             # Current elapsed time
             duration = time.time() - self._async_job.start_time
         return duration
+
+    def kill(self, sig=9):
+        """
+        Sends signal to the process
+        :param sig: Which signal to send [9]
+        """
+        return self._async_job.sp.send_signal(sig)
+
+
+class InteractiveAsyncDockerCmd(AsyncDockerCmd):
+    """
+    Execute docker command as asynchronous background process on ``execute()``
+    with PIPE as stdin and allows use of stdin(data) to interact with process.
+    """
+    def __init__(self, subtest, subcmd, subargs=None, timeout=None,
+                 verbose=True):
+        super(InteractiveAsyncDockerCmd, self).__init__(subtest, subcmd,
+                                                        subargs, timeout,
+                                                        verbose)
+        self._stdin = None
+        self._stdout_idx = 0
+
+    def execute(self, stdin=None):
+        """
+        Start execution of asynchronous docker command
+        """
+        ps_stdin, self._stdin = os.pipe()
+        ret = super(InteractiveAsyncDockerCmd, self).execute(ps_stdin)
+        if stdin:
+            self.stdin(stdin)
+        return ret
+
+    def stdin(self, data):
+        """
+        Sends data to stdin (partial send is possible!)
+        :param data: Data to be send
+        :return: Number of written data
+        """
+        return os.write(self._stdin, data)
