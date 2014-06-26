@@ -28,11 +28,17 @@ def session_responsive(session, timeout=5, internal_timeout=1):
     while time.time() < end_time:
         try:
             session.cmd_status("true", internal_timeout)
+            out = session.read_nonblocking(2)
+            if out:
+                raise Exception("This shouldn't happened; out:\n%s" % out)
             return True
         except dexpect.ShellError:
             pass
     try:    # +1 iteration in case we missed end_time of milliseconds...
         session.cmd_status("true", internal_timeout)
+        out = session.read_nonblocking(2)
+        if out:
+            raise Exception("This shouldn't happened; out:\n%s" % out)
         return True
     except dexpect.ShellError:
         pass
@@ -113,18 +119,21 @@ class detach_base(subtest.SubSubtest):
         if self.sub_stuff['session_log'] == dexpect.STORE:
             _ = session.get_log_records
             self.log_in_cleanup['session1_log'] = LogMe(_)
+        self.failif(not session_responsive(session), "Session not responsive "
+                    "after returning from container to bash.")
         self.sub_stuff['host_hostname'] = session.cmd("echo $HOSTNAME",
                                                       timeout=10)
         # After this command container should be in the foreground
         session.sendline(cmd)
+        # TODO: FIXME: Adjust this to the latest version before the merge
         if not tty or 'false' in str(tty).lower():
             self.sub_stuff['container_is_tty'] = False
             session.set_tty(False, 0)
         else:
             self.sub_stuff['container_is_tty'] = True
             session.set_tty(True, 0)
-        self.failif(not session.is_responsive(5), "Container not initialized "
-                    "in 5s.")
+        self.failif(not session_responsive(session), "Container not "
+                    "initialized in 5s.")
         self.sub_stuff['session'] = session
         self.sub_stuff['attach_cmd'] = DockerCmdBase(self.parent_subtest,
                                                      'attach', [name]).command
@@ -141,6 +150,7 @@ class detach_base(subtest.SubSubtest):
         """
         When everything went correctly, remove last log records.
         """
+        super(detach_base, self).postprocess()
         # All sessions are already closed, remove them from log_in_cleanup
         for name in ('session1_log', 'session2_log'):
             if name in self.log_in_cleanup:
@@ -274,7 +284,7 @@ class stress(detach_base):
         super(stress, self).run_once()
         session = self.sub_stuff['session']
         no_iterations = self.config['no_iterations']
-        self.log_in_cleanup['session_output'] = LogMe(session.get_log_records)
+        self.log_in_cleanup['session1_log'] = LogMe(session.get_log_records)
         session.set_logging(dexpect.STORE)
         self.loginfo("Starting %s iterations of detach/check/attach/check..."
                      % no_iterations)
@@ -302,7 +312,8 @@ class stress(detach_base):
         self.loginfo("%s iterations passed, stopping the container...",
                      no_iterations)
         session.set_logging(self.sub_stuff['session_log'])  # Use default logs
-        self.log_in_cleanup['session_output'] = session.get_log_records
+        if self.sub_stuff['session_log'] == dexpect.STORE:
+            self.log_in_cleanup['session1_log'] = session.get_log_records
         session.send_control('d')   # exit the container
         session.set_tty(False, 0)    # we should be in bash (no echo, no tty)
         self.failif(not session_responsive(session), "Session not responsive "

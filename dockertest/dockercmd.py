@@ -505,6 +505,7 @@ class InteractiveAsyncDockerCmd(AsyncDockerCmd):
         """
         ps_stdin, self._stdin = os.pipe()
         ret = super(InteractiveAsyncDockerCmd, self).execute(ps_stdin)
+        os.close(ps_stdin)
         if stdin:
             self.stdin(stdin)
         return ret

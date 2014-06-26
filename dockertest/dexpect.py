@@ -208,7 +208,10 @@ class Expect(object):
         """
         Terminates the managed process (-15 eventually followed by -9)
         """
-        self.process.wait(timeout)
+        try:
+            self.process.wait(timeout)
+        except AssertionError:  # already dead
+            pass
 
     def set_logging(self, log_func=None):
         """
@@ -305,9 +308,11 @@ class Expect(object):
         :param data: string
         """
         self.log(">>", data)
-        while data:
-            written = self.process.stdin(data)
-            data = data[written:]
+        self.process.stdin(data)
+        # Old method preserved in case we need to roll back
+        # while data:
+        #     written = self.process.stdin(data)
+        #     data = data[written:]
         # Probably not needed, re-enable in case of weird failures
         # termios.tcflush(self._pty, termios.TCIOFLUSH)
         # termios.tcdrain(self._pty)
@@ -602,7 +607,7 @@ class ShellSession(Expect):
                 return True
         # No output -- report unresponsive
         return False
-    
+
     def read_up_to_prompt_tty(self, timeout=60, internal_timeout=None):
         """
         Read using read_nonblocking until the last non-empty line of the output

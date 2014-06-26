@@ -3,9 +3,54 @@ Simple interaction
 """
 # Okay to be less-strict for these cautions/warnings in subtests
 # pylint: disable=C0103,C0111,R0904,C0103
-from dockertest import subtest
-from dockertest.containers import DockerContainers
+import time
+
 from autotest.client.shared import utils
+from dockertest import subtest
+from dockertest.dexpect import ShellSession, ShellError
+from dockertest.dockercmd import NoFailDockerCmd, InteractiveAsyncDockerCmd
+
+
+def wait_for_alive(sub_test, container):
+    """
+    :return: True when container is alive
+    """
+    def is_alive(sub_test, container):
+        cmd = NoFailDockerCmd(sub_test, "inspect",
+                              ["-f", "'{{.State.Running}}'", container])
+        out = cmd.execute().stdout
+        if "true" in out.lower():
+            return True
+        else:
+            return False
+    return utils.wait_for(lambda: is_alive(sub_test, container.long_id), 5)
+
+
+def session_responsive(session, timeout=3, internal_timeout=1):
+    """
+    Sends `true` command and queues for output. When output obtained => True
+    :warning: Don't set internal_timeout too low unless stressed machine
+              might not response quickly enough.
+    """
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            session.cmd_status("true", internal_timeout)
+            out = session.read_nonblocking(2)
+            if out:
+                raise Exception("This shouldn't happened; out:\n%s" % out)
+            return True
+        except ShellError:
+            pass
+    try:    # +1 iteration in case we missed end_time of milliseconds...
+        session.cmd_status("true", internal_timeout)
+        out = session.read_nonblocking(2)
+        if out:
+            raise Exception("This shouldn't happened; out:\n%s" % out)
+        return True
+    except ShellError:
+        pass
+    return False
 
 
 class interaction(subtest.SubSubtestCaller):
@@ -23,35 +68,55 @@ class interaction_base(subtest.SubSubtest):
         """
         super(interaction_base, self).initialize()
         # Prepare a container
-        containers = DockerContainers(self.parent_subtest)
-        self.sub_stuff['containers'] = containers
-        containers.create_docker_cfg('cont1', config=self.config)
-        container = containers.get_container_by_dname('cont1')
-        self.sub_stuff['container'] = container
-
+        config = self.config
+        ret = self.manager.create_container(config['container_command'],
+                    config['container_options_csv'].split(','))
+        self.sub_stuff['container'] = container = ret[0]
+        self.sub_stuff['process'] = process = ret[1]
         # No we have container up and running
         if self.config.get('session_attached'):
-            self.failif(not utils.wait_for(container.is_alive, 5),
+            self.failif(not wait_for_alive(self, container),
                         "Container did not started in 5s")
-            self.sub_stuff['session'] = container.get_session("cont1_attached")
+            attach = InteractiveAsyncDockerCmd(self, "attach",
+                                               [container.long_id])
+            attach.execute()
+            session = ShellSession(attach, tty=config['is_tty'],
+                                   name=container.container_name + '_1',
+                                   log_func=self.logdebug)
         else:
-            self.failif(not container.get_main_session(), "You are trying to"
-                        " use main process on detached container. Either set "
-                        "container as interactive or session_attached to yes")
-            self.sub_stuff['session'] = container.get_main_session()
+            session = ShellSession(process, tty=config['is_tty'],
+                                   name=container.container_name + '_1',
+                                   log_func=self.logdebug)
+        self.sub_stuff['session'] = session
 
     def run_once(self):
         super(interaction_base, self).run_once()
         session = self.sub_stuff['session']
-        self.failif(not session.is_responsive(), "Session not responsive.")
-        self.logdebug(session.cmd("ls"))
+        self.failif(not session_responsive(session), "Session not responsive.")
+        self.failif(session.cmd_status("ls"), "ls command failed.")
         session.send_control('s')
-        self.failif(session.is_responsive(2), "Session is responsive even "
-                    "though we sent ctrl+s")
+        if self.config['is_tty']:
+            self.failif(session_responsive(session), "Session is responsive "
+                        "even though we sent ctrl+s")
+        else:
+            ret = session.cmd_status_output("true")
+            self.failif(ret[0] != 127, "ctrl+s should pass \x12 directly to "
+                        "the stdin. After that true command was executed "
+                        "including this \x12 as first character, which should"
+                        "result in err 127, got %s instead. Out:\n%s"
+                        % (ret[0], ret[1]))
         session.send_control('q')
-        self.failif(not session.is_responsive(), "Session not responsive "
-                    "after sending ctrl+q.")
-
+        if self.config['is_tty']:
+            self.failif(not session_responsive(session), "Session not "
+                        "responsive after sending ctrl+q.")
+        else:
+            ret = session.cmd_status_output("true")
+            self.failif(ret[0] != 127, "ctrl+q should pass \x10 directly to "
+                        "the stdin. After that true command was executed "
+                        "including this \x10 as first character, which should"
+                        "result in err 127, got %s instead. Out:\n%s"
+                        % (ret[0], ret[1]))
+        session.sendline("")    # there might be some chars present...
         session.sendline('exit')
         not_alive = lambda: not session.is_alive()
         self.failif(not utils.wait_for(not_alive, 5), "Session is alive "
@@ -63,10 +128,10 @@ class interaction_base(subtest.SubSubtest):
         """
         super(interaction_base, self).cleanup()
         # Stop session
+        print self.config['remove_after_test']
         if self.config['remove_after_test'] is True:
-            # TODO: Put this into cleanup_managed_containers() when/if possible
-            self.sub_stuff['containers'].remove_args = "-f -v"
-            self.sub_stuff['containers'].cleanup_managed_containers()
+            self.manager.cleanup_containers()
+            self.manager.cleanup_images()
 
 
 class interactive_tty(interaction_base):

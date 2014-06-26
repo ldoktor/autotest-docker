@@ -28,6 +28,7 @@ from xceptions import DockerTestNAError
 from xceptions import DockerTestError
 from xceptions import DockerSubSubtestNAError
 
+
 class SubBase(object):
     """
     Methods/attributes common to Subtest & SubSubtest classes
@@ -54,6 +55,11 @@ class SubBase(object):
     #: Dictionary of stringalizable items, which must be printed during
     #: cleanup. This is intended for unexpected exceptions.
     log_in_cleanup = {}
+
+    #: DockerImages, DockerContainers, DockerManager - handful test tools
+    containers = None
+    images = None
+    manager = None
 
     def initialize(self):
 
@@ -293,9 +299,18 @@ class Subtest(SubBase, test.test):
             # Log original key/values before subtest could modify them
             self.write_test_keyval(self.config)
 
+        def _init_tooling():
+            from dockertest.images import DockerImages
+            from dockertest.containers import DockerContainers
+            from dockertest.docker_manager import DockerManager
+            self.containers = DockerContainers(self)
+            self.images = DockerImages(self)
+            self.manager = DockerManager(self)
+
         super(Subtest, self).__init__(*args, **dargs)
         _init_config()
         _init_logging()
+        _init_tooling()
         self.check_disable(self.config_section)
         # Optionally setup different iterations if option exists
         self.iterations = self.config.get('iterations', self.iterations)
@@ -366,6 +381,13 @@ class SubSubtest(SubBase):
     n_tabs = 2     # two-levels
 
     def __init__(self, parent_subtest):
+        def _init_tooling():
+            from dockertest.images import DockerImages
+            from dockertest.containers import DockerContainers
+            from dockertest.docker_manager import DockerManager
+            self.containers = DockerContainers(self.parent_subtest)
+            self.images = DockerImages(self.parent_subtest)
+            self.manager = DockerManager(self)
         classname = self.__class__.__name__
         # Allow parent_subtest to use any interface this
         # class is setup to support. Don't check type.
@@ -398,6 +420,7 @@ class SubSubtest(SubBase):
         self.tmpdir = tempfile.mkdtemp(prefix=classname + '_',
                                        suffix='tmpdir',
                                        dir=self.parent_subtest.tmpdir)
+        _init_tooling()
 
     def make_subsubtest_config(self, all_configs, parent_config,
                                subsubtest_config):
