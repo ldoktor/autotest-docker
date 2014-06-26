@@ -237,8 +237,8 @@ class Expect(object):
         if not self._log:    # Logging disabled
             return
         else:
-            for line in data.splitlines():
-                self._log("%s%s: %s" % (prefix, self.name, line))
+            for line in data.splitlines(True):
+                self._log("%s%s: %r" % (prefix, self.name, line))
 
     def get_log_records(self):
         """
