@@ -70,6 +70,12 @@ class DockerContainer(object):  # pylint: disable=R0902
 
         :param other: An instance of this class (or subclass) for comparison.
         """
+        if isinstance(other, str):      # Compare valid identifiers
+            if (self.image_name == other or self.long_id == other or
+                self.long_id[:12] == other):
+                return True
+            else:
+                return False
         self_val = [getattr(self, name) for name in self.__slots__]
         other_val = [getattr(other, name) for name in self.__slots__]
         for _self, _other in zip(self_val, other_val):
