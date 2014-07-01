@@ -1,3 +1,7 @@
+"""
+Stress test
+"""
+import os
 import time
 
 from autotest.client import utils
@@ -21,14 +25,20 @@ class stress(kill_base):
     postprocess:
     5) analyze results
     """
-
-    def _populate_kill_cmds(self, extra_subargs):
-        sequence = self._create_kill_sequence()
-        signals_set = set()
-        signals_sequence = []
+    @staticmethod
+    def _map_sequence_to_signals(sequence):
+        """
+        Analyzes given sequence and fills signals_sequence and set.
+        :param sequence: string defining the signals
+        :return: tuple(signals_sequence, signals_set)
+                 signals_sequence = sequence of signals (ints)
+                 signals_set = set of signals, which should be present in the
+                               output.
+        """
         stopped = False
         mapped = False
-        sigproxy = self.config.get('kill_sigproxy')
+        signals_set = set()
+        signals_sequence = []
         for item in sequence:
             if item == "M":
                 mapped = True
@@ -49,6 +59,12 @@ class stress(kill_base):
                     signal = SIGNAL_MAP.get(signal, signal)
                     mapped = False
                 signals_sequence.append(str(signal))
+        return signals_sequence, signals_set
+
+    def _populate_kill_cmds(self, extra_subargs):
+        sequence = self._create_kill_sequence()
+        sigproxy = self.config.get('kill_sigproxy')
+        signals_sequence, signals_set = self._map_sequence_to_signals(sequence)
 
         subargs = ["-s $SIGNAL"] + extra_subargs
         if sigproxy:
@@ -106,7 +122,7 @@ class stress(kill_base):
         if kill_cmds[1] is not False:   # Custom kill command
             self.sub_stuff['kill_results'].append(kill_cmds[1].execute())
         else:   # kill the container process
-            container_cmd._async_job.sp.send_signal(9)
+            os.kill(container_cmd.process_id, 9)
         for _ in xrange(50):
             if container_cmd.done:
                 break

@@ -9,6 +9,7 @@ postprocess:
 3) analyze results
 """
 import itertools
+import os
 import random
 import time
 
@@ -18,7 +19,6 @@ from dockertest.containers import DockerContainers
 from dockertest.dockercmd import AsyncDockerCmd, DockerCmd, NoFailDockerCmd
 from dockertest.images import DockerImage
 from dockertest.output import OutputGood
-import os
 
 
 # TODO: Not all named signals seems to be supported with docker0.9
@@ -28,6 +28,28 @@ SIGNAL_MAP = {1: 'HUP', 2: 'INT', 3: 'QUIT', 4: 'ILL', 5: 'TRAP', 6: 'ABRT',
               17: 'CHLD', 18: 'CONT', 19: 'STOP', 20: 'TSTP', 21: 'TTIN',
               22: 'TTOU', 23: 'URG', 24: 'XCPU', 25: 'XFSZ', 26: 'VTALRM',
               27: 'PROF', 28: 'WINCH', 29: 'IO', 30: 'PWR', 31: 'SYS'}
+
+
+class Output(object):   # only containment pylint: disable=R0903
+
+    """
+    Wraps object with `.stdout` method and returns only new chars out of it
+    """
+
+    def __init__(self, stuff):
+        self.stuff = stuff
+        self.idx = len(stuff.stdout)
+
+    def get(self, idx=None):
+        """
+        :param idx: Override last index
+        :return: Output of stuff.stdout from idx (or last read)
+        """
+        if idx is None:
+            idx = self.idx
+        out = self.stuff.stdout.splitlines()
+        self.idx = len(out)
+        return out[idx:]
 
 
 # Okay to be less-strict for these cautions/warnings in subtests
@@ -239,19 +261,94 @@ class kill_check_base(kill_base):
 
     """ Base class for signal-check based tests """
 
+    def _execute_command(self, cmd, signal, _container_pid):
+        """
+        Execute cmd and verify it was executed properly
+        :param cmd: DockerCmd or False to send signal directly
+        """
+        if cmd is not False:    # Custom command, execute&check cmd status
+            result = cmd.execute()
+            if signal == -1:
+                if result.exit_status == 0:    # Any bad signal
+                    msg = ("Kill command %s returned zero status when "
+                           "using bad signal."
+                           % (self.sub_stuff['kill_results'][-1].command))
+                    raise xceptions.DockerTestFail(msg)
+            else:
+                self.sub_stuff['kill_results'].append(result)
+                if result.exit_status != 0:
+                    msg = ("Kill command %s returned non-zero status. (%s)"
+                           % (self.sub_stuff['kill_results'][-1].command,
+                              self.sub_stuff['kill_results'][-1].exit_status))
+                    raise xceptions.DockerTestFail(msg)
+        else:   # Send signal directly to the docker process
+            self.logdebug("Sending signal %s directly to container pid %s",
+                          signal, _container_pid)
+            os.kill(_container_pid, signal)
+
+    def _kill_dash_nine(self, container_cmd):
+        """
+        Destroy the container with -9, check that it died in 5s
+        """
+        for _ in xrange(50):    # wait for command to finish
+            if container_cmd.done:
+                break
+            time.sleep(0.1)
+        else:
+            raise xceptions.DockerTestFail("Container process did not"
+                                           " finish when kill -9 "
+                                           "was executed.")
+        self.sub_stuff['container_results'] = container_cmd.wait()
+
+    @staticmethod
+    def _check_previous_payload(stopped_log, container_out, timeout,
+                                _check):
+        """
+        Checks that all signals from stopped_log are present in container out
+        """
+        # TODO: Signals 20, 21 and 22 are not reported after SIGCONT
+        #       even thought they are reported when docker is not
+        #       stopped.
+        if stopped_log:
+            endtime = time.time() + timeout
+            _idx = container_out.idx
+            line = None
+            out = None
+            while endtime > time.time():
+                try:
+                    out = container_out.get(_idx)
+                    for line in [_check % sig for sig in stopped_log]:
+                        out.remove(line)
+                    break
+                except ValueError:
+                    pass
+            else:
+                msg = ("Not all signals were handled inside container "
+                       "after SIGCONT execution.\nExpected output "
+                       "(unordered):\n  %s\nActual container output:\n"
+                       "  %s\nFirst missing line:\n  %s"
+                       % ("\n  ".join([_check % sig
+                                       for sig in stopped_log]),
+                          "\n  ".join(container_out.get(_idx)), line))
+                raise xceptions.DockerTestFail(msg)
+
+    @staticmethod
+    def _check_signal(container_out, _check, signal, timeout):
+        """
+        Check container for $signal check output presence
+        """
+        _idx = container_out.idx
+        check = _check % signal
+        output_matches = lambda: check in container_out.get(_idx)
+        # Wait until the signal gets logged
+        if wait_for(output_matches, timeout, step=0) is None:
+            msg = ("Signal %s not handled inside container.\nExpected "
+                   "output:\n  %s\nActual container output:\n  %s"
+                   % (signal, check,
+                      "\n  ".join(container_out.get(_idx))))
+            raise xceptions.DockerTestFail(msg)
+
     def run_once(self):
-        class Output(object):
-
-            def __init__(self, container):
-                self.container = container
-                self.idx = len(container.stdout)
-
-            def get(self, idx=None):
-                if idx is None:
-                    idx = self.idx
-                out = container_cmd.stdout.splitlines()
-                self.idx = len(out)
-                return out[idx:]
         # Execute the kill command
         super(kill_check_base, self).run_once()
         container_cmd = self.sub_stuff['container_cmd']
@@ -264,64 +361,17 @@ class kill_check_base(kill_base):
         stopped_log = False
         _container_pid = container_cmd.process_id
         for cmd, signal in itertools.izip(kill_cmds, signals_sequence):
-            if cmd is not False:    # Custom command, execute&check cmd status
-                result = cmd.execute()
-                if signal == -1:
-                    if result.exit_status == 0:    # Any bad signal
-                        msg = ("Kill command %s returned zero status when "
-                               "using bad signal."
-                               % (self.sub_stuff['kill_results'][-1].command))
-                        raise xceptions.DockerTestFail(msg)
-                    continue
-                self.sub_stuff['kill_results'].append(result)
-                if result.exit_status != 0:
-                    msg = ("Kill command %s returned non-zero status. (%s)"
-                           % (self.sub_stuff['kill_results'][-1].command,
-                              self.sub_stuff['kill_results'][-1].exit_status))
-                    raise xceptions.DockerTestFail(msg)
-            else:   # Send signal directly to the docker process
-                self.logdebug("Sending signal %s directly to container pid %s",
-                              signal, _container_pid)
-                os.kill(_container_pid, signal)
-            if signal == 9 or signal is None:   # SIGTERM
-                for _ in xrange(50):    # wait for command to finish
-                    if container_cmd.done:
-                        break
-                    time.sleep(0.1)
-                else:
-                    raise xceptions.DockerTestFail("Container process did not"
-                                                   " finish when kill -9 "
-                                                   "was executed.")
-                self.sub_stuff['container_results'] = container_cmd.wait()
+            self._execute_command(cmd, signal, _container_pid)
+            if signal == -1:    # Bad signal, no other checks
+                continue
+            elif signal == 9 or signal is None:   # SIGTERM
+                self._kill_dash_nine(container_cmd)
             elif signal == 19:    # SIGSTOP can't be caught
                 if stopped_log is False:
                     stopped_log = set()
             elif signal == 18:  # SIGCONT, check previous payload
-                # TODO: Signals 20, 21 and 22 are not reported after SIGCONT
-                #       even thought they are reported when docker is not
-                #       stopped.
-                if stopped_log:
-                    endtime = time.time() + timeout
-                    _idx = container_out.idx
-                    line = None
-                    out = None
-                    while endtime > time.time():
-                        try:
-                            out = container_out.get(_idx)
-                            for line in [_check % sig for sig in stopped_log]:
-                                out.remove(line)
-                            break
-                        except ValueError:
-                            pass
-                    else:
-                        msg = ("Not all signals were handled inside container "
-                               "after SIGCONT execution.\nExpected output "
-                               "(unordered):\n  %s\nActual container output:\n"
-                               "  %s\nFirst missing line:\n  %s"
-                               % ("\n  ".join([_check % sig
-                                               for sig in stopped_log]),
-                                  "\n  ".join(container_out.get(_idx)), line))
-                        raise xceptions.DockerTestFail(msg)
+                self._check_previous_payload(stopped_log, container_out,
+                                             timeout, _check)
                 stopped_log = False
             elif stopped_log is not False:  # if not false it's set()
                 if cmd is not False:
@@ -331,17 +381,8 @@ class kill_check_base(kill_base):
                     stopped_log.add(signal)  # pylint: disable=E1101
                 # else: using proxy:  signals are not forwarded by proxy, when
                 #                     proxy is SIGSTOPped.
-            else:
-                _idx = container_out.idx
-                check = _check % signal
-                output_matches = lambda: check in container_out.get(_idx)
-                # Wait until the signal gets logged
-                if wait_for(output_matches, timeout, step=0) is None:
-                    msg = ("Signal %s not handled inside container.\nExpected "
-                           "output:\n  %s\nActual container output:\n  %s"
-                           % (signal, check,
-                              "\n  ".join(container_out.get(_idx))))
-                    raise xceptions.DockerTestFail(msg)
+            else:   # normal signal should be logged in container
+                self._check_signal(container_out, _check, signal, timeout)
 
 
 class random_num(kill_check_base):

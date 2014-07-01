@@ -16,7 +16,7 @@ from dockertest.containers import DockerContainers
 from dockertest.dockercmd import AsyncDockerCmd, NoFailDockerCmd
 from dockertest.images import DockerImage
 from dockertest.subtest import SubSubtest
-from dockertest.xceptions import DockerTestFail
+from dockertest.xceptions import DockerTestFail, DockerExecError
 
 
 # Okay to be less-strict for these cautions/warnings in subtests
@@ -155,28 +155,26 @@ class sigproxy_base(SubSubtest):
         container_cmd = self.sub_stuff.get('container_cmd')
         # container_cmd might be temporarily NoFailDockerCmd
         if (container_cmd and hasattr(container_cmd, 'done')
-            and not container_cmd.done):
-            try:
-                utils.signal_pid(container_cmd.process_id, 15)
-                if not container_cmd.done:
-                    utils.signal_pid(container_cmd.process_id, 9)
-            except Exception, details:
-                failures.append("Container process didn't finish in 10s: %s"
-                                % details)
+                and not container_cmd.done):
+            utils.signal_pid(container_cmd.process_id, 15)
+            if not container_cmd.done:
+                utils.signal_pid(container_cmd.process_id, 9)
         if self.sub_stuff.get('container_name'):
             args = ['--force', '--volumes', self.sub_stuff['container_name']]
             try:
                 NoFailDockerCmd(self.parent_subtest, 'rm', args).execute()
-            except Exception, details:
+            except DockerExecError, details:
                 failures.append("Remove after test failed: %s" % details)
         self.failif(failures, "\n".join(failures))
 
 
 class sigproxy_disabled_base(sigproxy_base):
+
     """
     The same test as sixproxy_base, but with sig-proxy disabled (this version
     expects signals not to be passed to the container)
     """
+
     def init_test_specific_variables(self):
         raise NotImplementedError("Test specific variables has to be "
                                   "overridden by child.")
@@ -209,6 +207,7 @@ class default(sigproxy_base):
     * default is tty=false, sig-proxy=true
     * all signals should be forwarded properly
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = False
         self.sub_stuff['run_options_csv'] = ""
@@ -221,6 +220,7 @@ class tty_on_proxy_on(sigproxy_disabled_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * tty should force-disable sig-proxy thus no signals should be forwarded
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = False
         self.sub_stuff['run_options_csv'] = "--tty=true,--sig-proxy=true"
@@ -233,6 +233,7 @@ class tty_on_proxy_off(sigproxy_disabled_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = False
         self.sub_stuff['run_options_csv'] = "--tty=true,--sig-proxy=false"
@@ -245,6 +246,7 @@ class tty_off_proxy_on(sigproxy_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * all signals should be forwarded properly
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = False
         self.sub_stuff['run_options_csv'] = "--tty=false,--sig-proxy=true"
@@ -257,6 +259,7 @@ class tty_off_proxy_off(sigproxy_disabled_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = False
         self.sub_stuff['run_options_csv'] = "--tty=false,--sig-proxy=false"
@@ -270,6 +273,7 @@ class attach_default(sigproxy_base):
     * default is tty=false, sig-proxy=true
     * all signals should be forwarded properly
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = True
         self.sub_stuff['run_options_csv'] = "--detach"
@@ -282,6 +286,7 @@ class attach_tty_on_proxy_on(sigproxy_disabled_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * tty should force-disable sig-proxy thus no signals should be forwarded
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = True
         self.sub_stuff['run_options_csv'] = "--tty=true,--detach"
@@ -294,6 +299,7 @@ class attach_tty_on_proxy_off(sigproxy_disabled_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = True
         self.sub_stuff['run_options_csv'] = "--tty=true,--detach"
@@ -306,6 +312,7 @@ class attach_tty_off_proxy_on(sigproxy_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * all signals should be forwarded properly
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = True
         self.sub_stuff['run_options_csv'] = "--tty=false,--detach"
@@ -318,6 +325,7 @@ class attach_tty_off_proxy_off(sigproxy_disabled_base):
     Test usage of docker run/attach with/without '--sig-proxy'
     * sig-proxy is disabled thus no signals should be forwarded
     """
+
     def init_test_specific_variables(self):
         self.sub_stuff['attached'] = True
         self.sub_stuff['run_options_csv'] = "--tty=false,--detach"

@@ -1,9 +1,13 @@
+"""
+Parallel stress test
+"""
+
 import time
 
 from autotest.client import utils
+from dockertest import xceptions
 from dockertest.dockercmd import DockerCmd
 from kill import kill_base
-from dockertest import xceptions
 
 
 class parallel_stress(kill_base):
@@ -23,8 +27,11 @@ class parallel_stress(kill_base):
     """
 
     def _populate_kill_cmds(self, extra_subargs):
+        """
+        Generates signals_set and kill_cmds pseudo-randomly
+        """
         signals = [int(sig) for sig in self.config['kill_signals'].split()]
-        signals = range(*signals)
+        signals = range(*signals)   # unknown config args pylint: disable=W0142
         for noncatchable_signal in (9, 17):
             try:
                 signals.remove(noncatchable_signal)
@@ -48,29 +55,26 @@ class parallel_stress(kill_base):
         self.sub_stuff['kill_docker'] = DockerCmd(self.parent_subtest, 'kill',
                                                   extra_subargs)
 
-    def run_once(self):
-        # Execute the kill command
-        super(parallel_stress, self).run_once()
-        container_cmd = self.sub_stuff['container_cmd']
-        kill_cmds = self.sub_stuff['kill_cmds']
-        signals_set = self.sub_stuff['signals_set']
-        _check = self.config['check_stdout']
-
-        # Enable stress loops
+    def _execute_stress_loops(self, kill_jobs):
+        """
+        Enables stress loops
+        """
         self.sub_stuff['touch_result'] = utils.run("touch %s/docker_kill_"
                                                    "stress" % self.tmpdir)
         # Execute stress loops
-        self.sub_stuff['kill_jobs'] = []
-        for cmd in kill_cmds:
+        for cmd in self.sub_stuff['kill_cmds']:
             job = utils.AsyncJob(cmd, verbose=True)
-            self.sub_stuff['kill_jobs'].append(job)
+            kill_jobs.append(job)
 
-        # Wait test_length (while checking for failures)
+    def _wait_for_test_end(self, kill_jobs):
+        """
+        Waits test_length while checking for failures
+        """
         endtime = time.time() + self.config['test_length']
         while endtime > time.time():
-            for job in self.sub_stuff['kill_jobs']:
+            for job in kill_jobs:
                 if job.sp.poll() is not None:   # process finished
-                    for job in self.sub_stuff.get('kill_jobs', []):
+                    for job in kill_jobs:
                         self.logerror("cmd %s (%s)", job.command,
                                       job.sp.poll())
                     out = utils.run("ls %s/docker_kill_stress" % self.tmpdir,
@@ -81,20 +85,29 @@ class parallel_stress(kill_base):
                                                    "unexpectedly, see log for "
                                                    "details.")
 
-        # Stop stressers
+    def _stop_stressers(self, kill_jobs):
+        """
+        Stops the stressers
+        """
         cmd = "rm -f %s/docker_kill_stress" % self.tmpdir
         self.sub_stuff['rm_result'] = utils.run(cmd)
 
         self.sub_stuff['kill_results'] = []
-        for job in self.sub_stuff['kill_jobs']:
+        for job in kill_jobs:
             try:
                 self.sub_stuff['kill_results'].append(job.wait_for(5))
-            except Exception, details:
+            # job can raise whatever exception it wants, disable W0703
+            except Exception, details:  # pylint: disable=W0703
                 self.logerror("Job %s did not finish: %s", job.command,
                               str(details))
         del self.sub_stuff['kill_jobs']
 
-        # Check the output
+    def _check_the_output(self, container_cmd):
+        """
+        Checks the output
+        """
+        signals_set = self.sub_stuff['signals_set']
+        _check = self.config['check_stdout']
         endtime = time.time() + self.config['stress_cmd_timeout']
         line = None
         out = None
@@ -102,7 +115,8 @@ class parallel_stress(kill_base):
             try:
                 out = container_cmd.stdout.splitlines()
                 for line in [_check % sig for sig in signals_set]:
-                    out.remove(line)
+                    # out is always list in this branch, disable false E1103
+                    out.remove(line)    # pylint: disable=E1103
                 break
             except ValueError:
                 pass
@@ -116,7 +130,10 @@ class parallel_stress(kill_base):
                       "\n  ".join(container_cmd.stdout.splitlines()), line))
             raise xceptions.DockerTestFail(msg)
 
-        # Kill -9
+    def _destroy_container(self, container_cmd):
+        """
+        Stops the container with kill -9 signal
+        """
         cmd = self.sub_stuff['kill_docker']
         self.sub_stuff['kill_results'].append(cmd.execute())
         for _ in xrange(50):
@@ -128,6 +145,17 @@ class parallel_stress(kill_base):
                                            " finish when kill -9 "
                                            "was executed.")
         self.sub_stuff['container_results'] = container_cmd.wait()
+
+    def run_once(self):
+        super(parallel_stress, self).run_once()
+        container_cmd = self.sub_stuff['container_cmd']
+        kill_jobs = self.sub_stuff['kill_jobs'] = []
+
+        self._execute_stress_loops(kill_jobs)
+        self._wait_for_test_end(kill_jobs)
+        self._stop_stressers(kill_jobs)
+        self._check_the_output(container_cmd)
+        self._destroy_container(container_cmd)
 
     def pre_cleanup(self):
         if not self.sub_stuff.get('rm_result'):
