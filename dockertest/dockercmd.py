@@ -5,8 +5,8 @@ Frequently used docker CLI operations/data
 
 # Pylint runs from a different directory, it's fine to import this way
 # pylint: disable=W0403
-
 import time
+
 from autotest.client import utils
 from subtest import SubBase
 from xceptions import (DockerNotImplementedError,
@@ -476,3 +476,10 @@ class AsyncDockerCmd(DockerCmdBase):
             # Current elapsed time
             duration = time.time() - self._async_job.start_time
         return duration
+
+    def kill(self, sig=9):
+        """
+        Sends signal to the process
+        :param sig: Which signal to send [9]
+        """
+        return self._async_job.sp.send_signal(sig)
