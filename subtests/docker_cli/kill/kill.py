@@ -268,6 +268,7 @@ class kill_check_base(kill_base):
         """
         if cmd is not False:    # Custom command, execute&check cmd status
             result = cmd.execute()
+            self.sub_stuff['kill_results'].append(result)
             if signal == -1:
                 if result.exit_status == 0:    # Any bad signal
                     msg = ("Kill command %s returned zero status when "
@@ -275,7 +276,6 @@ class kill_check_base(kill_base):
                            % (self.sub_stuff['kill_results'][-1].command))
                     raise xceptions.DockerTestFail(msg)
             else:
-                self.sub_stuff['kill_results'].append(result)
                 if result.exit_status != 0:
                     msg = ("Kill command %s returned non-zero status. (%s)"
                            % (self.sub_stuff['kill_results'][-1].command,
