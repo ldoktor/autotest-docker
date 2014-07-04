@@ -17,6 +17,7 @@ from tag import change_tag
 from dockertest.images import DockerImage
 from autotest.client import utils
 
+
 class change_user(change_tag):
     config_section = 'docker_cli/commit/change_repository'
 

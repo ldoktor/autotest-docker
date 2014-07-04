@@ -10,6 +10,7 @@ docker pull --tag=xxx full_name
 from pull import pull_base, check_registry
 from dockertest.images import DockerImage
 
+
 class good_extra_tag(pull_base):
     config_section = 'docker_cli/pull/good_extra_tag'
 

@@ -23,6 +23,7 @@ from dockertest import subtest
 from dockertest import config
 from dockertest import xceptions
 
+
 class tag(subtest.SubSubtestCaller):
     config_section = 'docker_cli/tag'
 
@@ -43,7 +44,7 @@ class tag_base(SubSubtest):
         new_img_name = di.get_unique_name(name_prefix)
         while self.check_image_exists(new_img_name):
             new_img_name = "%s_%s" % (name_prefix,
-                                  utils.generate_random_string(8))
+                                      utils.generate_random_string(8))
 
         self.sub_stuff["image"] = new_img_name
         base_image = DockerImage.full_name_from_defaults(self.config)
@@ -61,8 +62,6 @@ class tag_base(SubSubtest):
 
         im = self.check_image_exists(self.sub_stuff["image"])
         self.sub_stuff['image_list'] = im
-
-
 
     def complete_docker_command_line(self):
         force = self.config["tag_force"]
@@ -142,7 +141,6 @@ class change_tag(tag_base):
                                                             registry,
                                                             registry_user)
         return new_img_name
-
 
     def initialize(self):
         super(change_tag, self).initialize()

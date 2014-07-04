@@ -18,6 +18,7 @@ from dockertest.images import DockerImage
 import random
 import string
 
+
 class change_registry(change_tag):
     config_section = 'docker_cli/commit/change_registry'
 
