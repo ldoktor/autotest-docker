@@ -424,6 +424,16 @@ us not defined.
 
 Simple test that checks the output of the ``docker version`` command.
 
+
+``docker_cli/attach`` Sub-test
+==================================
+
+Starts container and tries to attach it. Then it verifies that
+``docker attach`` process behaves correctly (signals, stdin, ...)
+
+``subsubtests = simple,no_stdin,sig_proxy_on,sig_proxy_off,sig_proxy_on``
+
+
 ``docker_cli/build`` Sub-test
 ==============================
 
@@ -504,14 +514,14 @@ for each sub-sub-test are also used.
 
 
 ``docker_cli/images_all`` Sub-test
-=================================
+==================================
 
 Checks the difference between ``docker images`` and ``docker images --all``.
 
 ``subsubtests`` = two_images_with_parents,with_unused_containers
 
 ``docker_cli/images_all/two_images_with_parents`` Subsub-test
------------------------------------------------------
+-------------------------------------------------------------
 
 #.  Create image test_a
 #.  Create image test_a1 with parent test_a
@@ -619,19 +629,24 @@ Three simple subsubtests that verify exit status and signal pass-through capabil
 
 
 ``docker_cli/run_attach`` Sub-test
-=================================
+==================================
 
 This test checks different ``docker run -a xxx`` variants.
 
-#. Starts `docker run` with defined combination of `-a ...`
-   6 variants are executed per each test:
-      variants:
-        - tty
-        - nontty
-      variants:
-        - stdin (execute bash, put 'ls /\n exit\n' on stdin)
-        - stdout (execute ls /)
-        - stderr (execute ls /nonexisting/directory/...)
+#.  Starts `docker run` with defined combination of `-a ...`
+    6 variants are executed per each test
+
+    * variants
+
+       -  tty
+       -  nontty
+
+    *  variants
+
+       -  stdin (execute bash, put 'ls /\n exit\n' on stdin)
+       -  stdout (execute ls /)
+       -  stderr (execute ls /nonexisting/directory/...)
+
 #. Analyze results
 
 subsubtests = none,stdin,stdout,stderr,in_out,in_err,in_out_err,
@@ -687,7 +702,7 @@ Tests the ``docker run -e xx=yy`` and other env-related features
 *  subsubtests = port,rm_link
 
 ``docker_cli/run_env/port`` Sub-subtest
--------------------------------------
+---------------------------------------
 
 #.  Starts server with custom -e ENV_VARIABLE=$RANDOM_STRING and opened port
 #.  Starts client linked to server with another ENV_VARIABLE
@@ -918,7 +933,7 @@ Several variations of running the kill command
 
 
 ``docker_cli/logs_follow`` Sub-test
-=================================
+===================================
 
 This test checks correctness of docker logs --follow
 
@@ -1283,19 +1298,19 @@ compares it's md5sum against a known value
    referenced by ``in_tar_file`` option.
 
 ``docker_daemon/network`` Sub-test
-===============================
+==================================
 
 This a set of test that check the container's network security.
 
 ``docker_daemon/network`` Prerequisites
-------------------------------------
+---------------------------------------
 
 *  Docker is installed in host system.
 *  Container os has installed python package.
 *  Command iptable and brctl are working well.
 
 ``docker_daemon/network`` Configuration
--------------------------------------
+---------------------------------------
 
 *  The option ``docker_daemon_args`` sets the special network args.
 *  The option ``docker_daemon_bind`` sets special bind address.
@@ -1305,30 +1320,31 @@ This a set of test that check the container's network security.
 
 Test if inter-container communication works properly.
 
-1. restart daemon with icc=false (forbid communication)
-   in network_base.initialize
-2. start container1 and get their ip addr
-3. Try to connect containers with python
-  * Start script for listening
+#.  restart daemon with icc=false (forbid communication)
+    in network_base.initialize
+#.  start container1 and get their ip addr
+#.  Try to connect containers with python
+    * Start script for listening
 
-  ::
+    ::
 
             python -c 'import socket; s = socket.socket();
                        s.bind(("0.0.0.0", 8081)); w = s.listen(10);
                        w,_ = s.accept(); w.sendall("works");
                        w.close(); s.close()'
-  * start container2 and try to connect and recv from container1
 
-  ::
+    * start container2 and try to connect and recv from container1
+
+    ::
 
             python -c 'import socket; s = socket.socket();
                        s.connect(("192.168.100.1", 8081)); print s.recv(100);
                        s.close();
-4. If python is not found fall back to ping
-5. fail if communication pass from container2 to container1
+#.  If python is not found fall back to ping
+#.  fail if communication pass from container2 to container1
 
 ``docker_daemon/network/icc`` Configuration
------------------------------------------
+-------------------------------------------
 
 *  The option ``docker_cmd1_args`` sets args for server container commands.
 *  The option ``docker_cmd2_args`` sets args for client container commands.
@@ -1351,7 +1367,7 @@ This a set of test that check the container's network security.
 *  The option ``docker_options_spec`` sets additional docker options.
 
 ``docker_daemon/tls/tls_verify_all`` Subsub-test
------------------------------------------
+-------------------------------------------------
 
 Test docker tls verification.
 
@@ -1361,7 +1377,7 @@ Test docker tls verification.
 #. Verify if docker tls verification works properly.
 
 ``docker_daemon/tls/tls_verify_only_server`` Subsub-test
------------------------------------------
+--------------------------------------------------------
 
 Test docker tls connection test check only server identity using ca.crt
 
@@ -1373,7 +1389,7 @@ Test docker tls connection test check only server identity using ca.crt
 #. cleanup all containers and images.
 
 ``docker_daemon/tls/tls_verify_server_no_client`` Subsub-test
------------------------------------------
+--------------------------------------------------------------
 
 Test docker tls connection test check only server identity using ca.crt server
 do not check wrong certificate from passed from client.
@@ -1399,10 +1415,9 @@ Client should return exitstatus different from 0 and should contain
 #) Check if client fail.
 #) cleanup all containers and images.
 
------------------------------------------
 
 ``docker_daemon/tls/tls_verify_wrong_server`` Subsub-test
------------------------------------------
+----------------------------------------------------------
 
 Test docker tls. Try to connect to server which uses wrong certificates with
 client good certificates. Client should return exitstatus different from 0 and
