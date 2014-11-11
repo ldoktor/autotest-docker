@@ -380,7 +380,7 @@ def get_as_list(value, sep=","):
     value = "a,b , c, dd"
     return ["a","b","c","dd"]
     """
-    return [val.strip() for val in value.split(sep)]
+    return [val for val in (_.strip() for _ in value.split(sep)) if val]
 
 
 def none_if_empty(dict_like, key_name=None):
